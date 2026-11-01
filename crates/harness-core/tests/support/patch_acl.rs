@@ -96,7 +96,18 @@ Set-OwnedAcl ([System.IO.Path]::GetDirectoryName($env:OWNED_PATCH_FILE)) $sddl.R
 [System.IO.Directory]::CreateDirectory($env:OWNED_PATCH_FILE) | Out-Null
 Set-OwnedAcl $env:OWNED_PATCH_FILE $sddl
 $actual=[OwnedPatchAcl]::Read($env:OWNED_PATCH_FILE)
-if (!$actual.EndsWith($sddl)) { throw "Legacy parent not established: $actual" }
+$expectedDescriptor=[System.Security.AccessControl.RawSecurityDescriptor]::new($sddl)
+$actualDescriptor=[System.Security.AccessControl.RawSecurityDescriptor]::new($actual)
+$expectedAcl=[byte[]]::new($expectedDescriptor.DiscretionaryAcl.BinaryLength)
+$actualAcl=[byte[]]::new($actualDescriptor.DiscretionaryAcl.BinaryLength)
+$expectedDescriptor.DiscretionaryAcl.GetBinaryForm($expectedAcl,0)
+$actualDescriptor.DiscretionaryAcl.GetBinaryForm($actualAcl,0)
+# Compare actual SIDs/ACEs, not SDDL aliases (the runner's user can render as LA).
+# 0x1500 covers DACL protection and auto-inheritance/request control bits.
+if (($actualDescriptor.ControlFlags -band 0x1500) -ne 0 -or
+    [Convert]::ToBase64String($expectedAcl) -ne [Convert]::ToBase64String($actualAcl)) {
+    throw "Legacy parent not established: $actual"
+}
 $actual
 "#;
 
