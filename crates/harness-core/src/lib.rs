@@ -1,17 +1,22 @@
 mod config;
+mod context;
 mod domain;
 mod engine;
 pub mod execution;
+mod journal;
 mod provider;
 mod records;
 mod store;
+mod turn_loop;
+mod workspace;
+mod workspace_lock;
 
-pub use config::Config;
+pub use config::{Config, Policy};
 pub use domain::*;
 pub use engine::{Engine, TurnHandle};
-pub use provider::{
-    Epoch, ProtocolMessage, ProviderRequest, ScriptFrame, ScriptStep, ScriptedProvider,
-};
+pub use journal::UsageRecord;
+pub use provider::*;
+pub use workspace::Instruction;
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum Error {
@@ -21,6 +26,12 @@ pub enum Error {
     Schema,
     #[error("workspace or session has unresolved work")]
     Busy,
+    #[error("{0}")]
+    UnresolvedWork(UnresolvedWork),
+    #[error(
+        "recovery database unavailable in original --data-dir \"{}\"; restore it before resuming or abandoning work", data_dir.display()
+    )]
+    RecoveryStoreUnavailable { data_dir: std::path::PathBuf },
     #[error("session binding does not match this engine")]
     Binding,
     #[error("record not found")]
@@ -33,6 +44,8 @@ pub enum Error {
     Shutdown,
     #[error("engine worker stopped unexpectedly")]
     Worker,
+    #[error("scoped inspection failed: {0}")]
+    Scope(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

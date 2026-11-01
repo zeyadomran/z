@@ -33,7 +33,7 @@ async fn schema_mismatch_never_rewrites_existing_data() {
         connection
             .pragma_update(None, "application_id", 0x5a484152_i64)
             .unwrap();
-        connection.pragma_update(None, "user_version", 1).unwrap();
+        connection.pragma_update(None, "user_version", 2).unwrap();
         connection.close().unwrap();
         let mut reopened = Engine::open(config, ScriptedProvider::new(vec![]))
             .await
@@ -80,7 +80,7 @@ async fn workspace_exclusion_and_session_binding_survive_independent_connections
     let mut other = Engine::open(
         Config {
             workspace: other_workspace,
-            ..config
+            ..config.clone()
         },
         ScriptedProvider::new(vec![]),
     )
@@ -95,4 +95,19 @@ async fn workspace_exclusion_and_session_binding_survive_independent_connections
     first.shutdown().await.unwrap();
     second.shutdown().await.unwrap();
     other.shutdown().await.unwrap();
+    // A cleanly closed store may be deleted without stranding its workspace.
+    std::fs::remove_file(config.data_dir.join("harness.sqlite")).unwrap();
+    let mut fresh = Engine::open(
+        Config::new(config.workspace, root.path().join("fresh-data")),
+        ScriptedProvider::new(vec![ScriptStep::reply("fresh", "available")]),
+    )
+    .await
+    .unwrap();
+    let session = fresh.create_session().await.unwrap();
+    let mut next = fresh.submit(session, "fresh".into()).await.unwrap();
+    assert_eq!(
+        next.outcome().await.unwrap().text.as_deref(),
+        Some("available")
+    );
+    fresh.shutdown().await.unwrap();
 }

@@ -1,38 +1,36 @@
 use crate::{
-    records,
+    journal, records,
     store::{Store, StoreWorker},
+    turn_loop::TurnRun,
+    workspace_lock::WorkspaceLock,
     *,
 };
 use std::sync::Arc;
 use tokio::{
     sync::{Mutex, oneshot, watch},
     task::JoinHandle,
-    time::Instant,
 };
-
 pub struct Engine {
     config: Config,
     workspace: String,
+    binding: ProviderBinding,
     store: Option<Store>,
     worker: Option<StoreWorker>,
-    provider: Arc<Mutex<ScriptedProvider>>,
+    provider: Arc<Mutex<Box<dyn Provider>>>,
     active: Option<ActiveTurn>,
 }
-
 struct ActiveTurn {
     cancel: watch::Sender<bool>,
     outcome: watch::Receiver<Option<Result<TurnOutcome>>>,
     task: JoinHandle<Result<()>>,
 }
-
-/// Retained completion and coalescing durable-event cursor, independent of cancellation.
 pub struct TurnHandle {
     pub id: TurnId,
     cancel: watch::Sender<bool>,
     cursor: watch::Receiver<EventSequence>,
     outcome: watch::Receiver<Option<Result<TurnOutcome>>>,
+    progress: watch::Receiver<Progress>,
 }
-
 impl TurnHandle {
     pub fn cancel(&self) {
         self.cancel.send_replace(true);
@@ -40,62 +38,83 @@ impl TurnHandle {
     pub fn latest_sequence(&self) -> EventSequence {
         *self.cursor.borrow()
     }
-
-    /// A cursor is a notification, never an execution acknowledgment.
     pub async fn changed(&mut self) -> Result<EventSequence> {
         self.cursor.changed().await.map_err(|_| Error::Shutdown)?;
         Ok(*self.cursor.borrow_and_update())
     }
-
+    /// Coalesced bounded presentation; no consumer acknowledgment gates execution.
+    pub fn progress_receiver(&self) -> watch::Receiver<Progress> {
+        self.progress.clone()
+    }
     pub async fn outcome(&mut self) -> Result<TurnOutcome> {
         loop {
-            if let Some(outcome) = self.outcome.borrow().clone() {
-                return outcome;
+            if let Some(o) = self.outcome.borrow().clone() {
+                return o;
             }
             self.outcome.changed().await.map_err(|_| Error::Worker)?;
         }
     }
 }
-
 impl Drop for TurnHandle {
     fn drop(&mut self) {
         self.cancel();
     }
 }
-
 impl Engine {
-    pub async fn open(config: Config, provider: ScriptedProvider) -> Result<Self> {
+    pub async fn open(config: Config, provider: impl Provider) -> Result<Self> {
         let config = tokio::task::spawn_blocking(move || config.validate())
             .await
             .map_err(|_| Error::Worker)??;
         let workspace = config.workspace_identity()?;
+        let binding = provider.binding();
+        let _creation_guard = WorkspaceLock::guard_creation(&config, &workspace).await?;
         let (store, worker) = Store::open(config.data_dir.join("harness.sqlite")).await?;
         Ok(Self {
             config,
             workspace,
+            binding,
             store: Some(store),
             worker: Some(worker),
-            provider: Arc::new(Mutex::new(provider)),
+            provider: Arc::new(Mutex::new(Box::new(provider))),
             active: None,
         })
     }
-
     fn store(&self) -> Result<&Store> {
         self.store.as_ref().ok_or(Error::Shutdown)
     }
-
     pub async fn create_session(&mut self) -> Result<SessionId> {
-        records::create_session(self.store()?, self.workspace.clone()).await
+        let config = self.config.clone();
+        let (prefix, instructions) = tokio::task::spawn_blocking(move || context::prefix(&config))
+            .await
+            .map_err(|_| Error::Worker)??;
+        records::create_session(
+            self.store()?,
+            self.workspace.clone(),
+            self.binding.clone(),
+            prefix,
+            instructions,
+        )
+        .await
     }
-
-    /// Accepted prompt persistence precedes the returned handle. Drop the handle to cancel.
     pub async fn submit(&mut self, session: SessionId, prompt: String) -> Result<TurnHandle> {
-        self.store()?;
         if prompt.trim().is_empty() || prompt.len() > self.config.max_prompt_bytes {
             return Err(Error::Configuration(
                 "prompt is empty or exceeds its byte limit".into(),
             ));
         }
+        self.launch(session, Some(prompt), None).await
+    }
+    /// Explicit user action resumes consumed budgets; raising Config limits is a
+    /// host decision. Completed read results are never replayed.
+    pub async fn resume(&mut self, session: SessionId, turn: TurnId) -> Result<TurnHandle> {
+        self.launch(session, None, Some(turn)).await
+    }
+    /// Explicitly abandon unresolved read-only work without inference or budget
+    /// checks. Pending results and the terminal outcome are committed atomically.
+    /// This local user action needs workspace ownership, not provider credentials;
+    /// it never changes the session binding or authorizes subsequent inference.
+    pub async fn abandon(&mut self, session: SessionId, turn: TurnId) -> Result<TurnOutcome> {
+        self.store()?;
         if let Some(active) = &self.active
             && !active.task.is_finished()
             && active.outcome.borrow().is_none()
@@ -103,69 +122,109 @@ impl Engine {
             return Err(Error::Busy);
         }
         if let Some(active) = self.active.take() {
-            active.task.await.map_err(|_| Error::Worker)??;
+            // A prior persistence error does not forbid explicit recovery.
+            let _ = active.task.await.map_err(|_| Error::Worker)?;
+        }
+        let lock = WorkspaceLock::acquire(&self.config, &self.workspace).await?;
+        let outcome = journal::abandon(self.store()?, self.workspace.clone(), session, turn).await;
+        let cleanup = lock
+            .release_if_resolved(self.store()?, &self.workspace)
+            .await;
+        outcome.and_then(|outcome| cleanup.map(|()| outcome))
+    }
+    async fn launch(
+        &mut self,
+        session: SessionId,
+        prompt: Option<String>,
+        resume: Option<TurnId>,
+    ) -> Result<TurnHandle> {
+        self.store()?;
+        if let Some(a) = &self.active
+            && !a.task.is_finished()
+            && a.outcome.borrow().is_none()
+        {
+            return Err(Error::Busy);
+        }
+        if let Some(a) = self.active.take() {
+            a.task.await.map_err(|_| Error::Worker)??;
         }
         let (cancel, cancellation) = watch::channel(false);
         let (cursor, cursor_rx) = watch::channel(EventSequence(0));
         let (result, result_rx) = watch::channel(None);
+        let (progress, progress_rx) = watch::channel(Progress::default());
         let (accepted, accepted_rx) = oneshot::channel();
         let store = self.store()?.clone();
         let provider = self.provider.clone();
         let config = self.config.clone();
         let workspace = self.workspace.clone();
-        let limits = config.limits_json()?;
-        // Ownership is installed before awaiting acceptance. Cancelling this submit
-        // future drops the observer; the coordinator still owns and closes the turn.
+        let binding = self.binding.clone();
         let task = tokio::spawn(async move {
-            let (turn, request, sequence) =
-                match records::start(&store, workspace, session, prompt, limits).await {
-                    Ok(value) => value,
+            let config_workspace = workspace.clone();
+            let prepare = async {
+                let lock = WorkspaceLock::acquire(&config, &workspace).await?;
+                let prepared = async {
+                    journal::reconcile(&store, workspace.clone()).await?;
+                    let (turn, request, seq) = if let Some(turn) = resume {
+                        let r = journal::resume(
+                            &store,
+                            workspace,
+                            session,
+                            turn,
+                            binding,
+                            config.limits_json()?,
+                        )
+                        .await?;
+                        (turn, r, EventSequence(0))
+                    } else {
+                        records::start(
+                            &store,
+                            workspace,
+                            session,
+                            prompt.ok_or(Error::Worker)?,
+                            config.limits_json()?,
+                            binding,
+                        )
+                        .await?
+                    };
+                    Ok::<_, Error>((turn, request, seq))
+                }
+                .await;
+                match prepared {
+                    Ok((turn, request, seq)) => Ok((lock, turn, request, seq)),
                     Err(error) => {
-                        let _ = accepted.send(Err(error));
-                        return Ok(());
+                        lock.release_if_resolved(&store, &config_workspace).await?;
+                        Err(error)
                     }
-                };
-            cursor.send_replace(sequence);
+                }
+            }
+            .await;
+            let (lock, turn, request, seq) = match prepare {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = accepted.send(Err(e));
+                    return Ok(());
+                }
+            };
+            cursor.send_replace(seq);
             let _ = accepted.send(Ok(turn));
-            let started = Instant::now();
-            let response = tokio::select! {
-                biased;
-                _ = cancelled(cancellation) => provider::Response { reason: StopReason::Cancelled, text: None },
-                _ = cursor.closed() => provider::Response { reason: StopReason::Cancelled, text: None },
-                _ = tokio::time::sleep(config.turn_timeout) => provider::Response { reason: StopReason::Deadline, text: None },
-                response = async { provider.lock().await.respond(request, config.max_output_bytes).await } =>
-                    response.unwrap_or(provider::Response { reason: StopReason::Protocol, text: None }),
-            };
-            let state = match response.reason {
-                StopReason::Final => TurnState::Completed,
-                StopReason::Cancelled => TurnState::Cancelled,
-                StopReason::Deadline | StopReason::OutputLimit => TurnState::SuspendedLimit,
-                StopReason::Refused => TurnState::Refused,
-                _ => TurnState::Failed,
-            };
-            let outcome = TurnOutcome {
-                turn_id: turn,
-                state,
-                reason: response.reason,
-                text: response.text,
-            };
-            let elapsed = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
-            // Bounded persistence retry reuses the same result, never the provider.
-            let mut saved = records::finish(&store, session, outcome.clone(), elapsed).await;
-            if matches!(saved, Err(Error::Busy)) {
-                saved = records::finish(&store, session, outcome.clone(), elapsed).await;
+            let outcome = TurnRun {
+                store: store.clone(),
+                provider,
+                config,
+                session,
+                turn,
+                request,
+                cancellation,
+                cursor,
+                progress,
             }
-            match saved {
-                Ok(sequence) => {
-                    cursor.send_replace(sequence);
-                    result.send_replace(Some(Ok(outcome)));
-                    Ok(())
-                }
-                Err(error) => {
-                    result.send_replace(Some(Err(error.clone())));
-                    Err(error)
-                }
-            }
+            .run()
+            .await;
+            // Release OS ownership only after all durable work has settled.
+            let cleanup = lock.release_if_resolved(&store, &config_workspace).await;
+            let outcome = outcome.and_then(|outcome| cleanup.map(|()| outcome));
+            result.send_replace(Some(outcome.clone()));
+            outcome.map(|_| ())
         });
         self.active = Some(ActiveTurn {
             cancel: cancel.clone(),
@@ -178,72 +237,93 @@ impl Engine {
             cancel,
             cursor: cursor_rx,
             outcome: result_rx,
+            progress: progress_rx,
         })
     }
-
     pub async fn history(&self, session: SessionId) -> Result<Vec<Message>> {
-        records::history(self.store()?, self.workspace.clone(), session).await
+        records::history(
+            self.store()?,
+            self.workspace.clone(),
+            session,
+            self.binding.clone(),
+        )
+        .await
     }
-
-    /// At most 256 events; continue from the returned last sequence to drain a backlog.
     pub async fn events(
         &self,
         session: SessionId,
         after: EventSequence,
     ) -> Result<Vec<DurableEvent>> {
-        records::events(self.store()?, self.workspace.clone(), session, after).await
+        records::events(
+            self.store()?,
+            self.workspace.clone(),
+            session,
+            after,
+            self.binding.clone(),
+        )
+        .await
     }
-
     pub async fn turn_outcome(
         &self,
         session: SessionId,
         turn: TurnId,
     ) -> Result<Option<TurnOutcome>> {
-        records::outcome(self.store()?, self.workspace.clone(), session, turn).await
+        records::outcome(
+            self.store()?,
+            self.workspace.clone(),
+            session,
+            turn,
+            self.binding.clone(),
+        )
+        .await
     }
-
+    pub async fn usage(&self, session: SessionId) -> Result<Vec<journal::UsageRecord>> {
+        journal::usage(
+            self.store()?,
+            self.workspace.clone(),
+            session,
+            self.binding.clone(),
+        )
+        .await
+    }
+    pub async fn protocol_history(&self, session: SessionId) -> Result<ProviderRequest> {
+        let w = self.workspace.clone();
+        let b = self.binding.clone();
+        self.store()?
+            .call(move |c| {
+                records::binding(c, session, &w, &b)?;
+                records::request(c, session)
+            })
+            .await
+    }
     pub async fn shutdown(&mut self) -> Result<()> {
         let mut result = Ok(());
-        if let Some(active) = self.active.take() {
-            active.cancel.send_replace(true);
-            result = active.task.await.map_err(|_| Error::Worker).and_then(|r| r);
+        if let Some(a) = self.active.take() {
+            a.cancel.send_replace(true);
+            result = a.task.await.map_err(|_| Error::Worker).and_then(|r| r);
         }
         self.store.take();
-        if let Some(worker) = self.worker.take() {
-            tokio::task::spawn_blocking(move || worker.0.join())
+        if let Some(w) = self.worker.take() {
+            tokio::task::spawn_blocking(move || w.0.join())
                 .await
                 .map_err(|_| Error::Worker)?
                 .map_err(|_| Error::Worker)?;
         }
         result
     }
-
-    /// Join current work without requesting cancellation. Observation is optional.
     pub async fn wait_idle(&mut self) -> Result<()> {
-        if let Some(active) = self.active.as_mut() {
-            let result = (&mut active.task).await.map_err(|_| Error::Worker)?;
+        if let Some(a) = self.active.as_mut() {
+            let r = (&mut a.task).await.map_err(|_| Error::Worker)?;
             self.active.take();
-            result?;
+            r?;
         }
         Ok(())
     }
 }
-
 impl Drop for Engine {
     fn drop(&mut self) {
-        if let Some(active) = &self.active {
-            active.cancel.send_replace(true);
-        }
-    }
-}
-
-async fn cancelled(mut signal: watch::Receiver<bool>) {
-    loop {
-        if *signal.borrow_and_update() {
-            return;
-        }
-        if signal.changed().await.is_err() {
-            return;
+        if let Some(a) = &self.active {
+            a.cancel.send_replace(true);
         }
     }
 }

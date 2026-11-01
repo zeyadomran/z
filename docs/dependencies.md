@@ -48,3 +48,33 @@ dependency security audit or a claim of no vulnerabilities. PR dependency
 review and Cargo Dependabot updates remain enabled. Recheck the actual lockfile
 and upstream advisories when updating or qualifying a release. No HTTP/auth,
 tracing, native process or plugin dependencies were added before their slice.
+
+## M1a dependency additions
+
+Checked against upstream crate metadata/API documentation on 2026-11-01:
+
+- reqwest **0.13.5**, native-tls **0.2.18**, schannel **0.1.30** on Windows:
+  native Windows TLS, explicit direct/proxy selection, disabled redirects and
+  connect/read-idle deadlines, with the engine bounding overall active work.
+  Default reqwest features (including implicit
+  system proxy discovery) are disabled. Only native-tls/json/stream are enabled.
+  [reqwest](https://docs.rs/reqwest/0.13.5/reqwest/),
+  [native-tls](https://docs.rs/native-tls/0.2.18/native_tls/).
+- sha2 **0.11.1** for full raw-file/instruction/workspace identity hashes;
+  [upstream](https://docs.rs/sha2/0.11.1/sha2/).
+- httpdate **1.0.3** for standard Retry-After HTTP dates;
+  [upstream](https://docs.rs/httpdate/1.0.3/httpdate/).
+- windows-sys **0.61.2** for final-handle paths, file link count and drive type.
+  Native unsafe code is confined to the reviewed workspace handle and native
+  execution modules; the rest of the workspace denies unsafe code. The merged
+  [launcher prerequisite](windows-launcher.md) uses additional Windows features
+  of the same crate; agent command execution remains M3 work.
+  [bindings](https://docs.rs/windows-sys/0.61.2/windows_sys/).
+- rusqlite's existing version now enables its `backup` feature for consistent
+  v1-to-v2 migration backups. SQLite remains the M0 bundled version.
+
+These added direct dependencies declare MIT/Apache-2.0 alternatives and minimum
+Rust versions below the pinned toolchain. Cargo.lock records the complete graph;
+CI dependency review remains required. Native TLS uses the supported host trust
+store. This targeted version/API/license check is not a complete security audit.
+No dependency update changes the outstanding live provider release gates.
