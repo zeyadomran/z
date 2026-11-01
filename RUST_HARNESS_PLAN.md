@@ -1,6 +1,6 @@
 # Rust coding-agent harness implementation plan
 
-Status: revised v2; both independent v1 reviews have been reconciled in `reviews/REVIEW_RECONCILIATION.md`. OpenRouter and direct ChatGPT plan access are both required in v0.1. These requirements postdate the frozen review input at `reviews/RUST_HARNESS_PLAN.v1.md`, and v2 has not been independently re-reviewed. No harness has been implemented or runtime behavior verified.
+Status: revised v2; both independent v1 reviews have been reconciled in `reviews/REVIEW_RECONCILIATION.md`. OpenRouter and direct ChatGPT plan access are both required in v0.1. These requirements postdate the frozen review input at `reviews/RUST_HARNESS_PLAN.v1.md`, and v2 has not been independently re-reviewed. M0 now implements a deterministic scripted turn and durable SQLite history. See [M0 contracts](docs/m0-contracts.md) and [actual validation limits](docs/testing.md); live providers, tools and recovery remain unqualified.
 
 
 - [1. Outcome and scope](docs/plan/01.md)

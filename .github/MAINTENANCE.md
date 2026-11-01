@@ -4,7 +4,7 @@
 
 Use PRs for all changes after bootstrap, including administrators. Squash-only merging, automatic branch deletion, auto-merge, and branch updates are enabled. Main requires up-to-date checks, resolved conversations, and stale-review dismissal. Force pushes and deletion are blocked. Zero approving reviews are required for this solo-maintainer repository.
 
-Required contexts: `Workflow validation`, `Git hooks (ubuntu-latest)`, `Git hooks (windows-latest)`, `Dependency review`, `Analyze (actions)`, and the separate `CodeQL` findings check. Re-read actual protection and current-head checks before each authorized merge.
+Required contexts: `Workflow validation`, `Git hooks (ubuntu-latest)`, `Git hooks (windows-latest)`, `Dependency review`, `Analyze (actions)`, the separate `CodeQL` findings check, and `Rust (Windows)`. Re-read actual protection and current-head checks before each authorized merge.
 
 ## Checks and security
 
@@ -14,6 +14,15 @@ Enable Dependabot vulnerability alerts and security fixes, secret scanning and p
 
 ## Dependency updates and Rust activation
 
-Dependabot checks pinned Actions weekly on Monday at 09:00 America/Toronto, groups updates, and uses Conventional Commit prefixes. Review and validate each update; updates are not automatically merged. No npm dependencies or Cargo manifests exist yet.
+Dependabot checks pinned Actions and Cargo dependencies weekly on Monday at
+09:00 America/Toronto, groups updates by ecosystem, and uses Conventional
+Commit prefixes. Review and validate each update; updates are not automatically
+merged. There are no npm dependencies. Cargo.lock records the executable's
+resolved dependency graph.
 
-With the first Cargo workspace, commit Cargo.lock, pin the supported Rust toolchain, add Cargo Dependabot updates, and add mandatory Windows formatting, Clippy, build, and canonical functional checks. Extend CodeQL only with supported languages/configuration verified at that time. Register required contexts only after they actually run. Preserve the existing hook suite rather than adding duplicate tests.
+M0 adds the pinned Rust toolchain and the `Rust (Windows)` CI context for
+formatting, Clippy, the public-engine functional suite, release build and a
+credential-free CLI smoke. This context was added to branch protection after
+its first successful run on 2026-11-01, preserving all six previous checks.
+Preserve all existing required contexts and the hook suite. Actions CodeQL
+remains unchanged; Rust source security qualification is not claimed.
