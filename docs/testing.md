@@ -30,11 +30,18 @@ unchanged. The Rust Windows job retains the credential-free scripted CLI smoke.
   retry discard events, cumulative usage snapshots and incompatible catalog
   configuration. Catalog requests carry no credential; inference fixtures use a
   fixed dummy header and cannot access host secrets.
+- `openrouter_resume.rs` owns credential replacement rejection and explicit
+  provider token-cap increases across durable suspension/reopen. Host budget
+  changes do not change account/model/route identity or reset consumed attempts.
 - `provider_contract.rs` retains closed-pairing/frozen-epoch validation and
   incomplete/malformed/disconnected/refused/executable scaffold-frame failures.
+  Refusal coverage retains audit messages while excluding the refused turn from
+  subsequent provider input.
 - `scope.rs` owns path escapes, ADS/device/trailing-dot paths, credential aliases,
   hard links, an actual owned Windows junction, common read/list/search exclusions
   and nested instruction provenance. It checks real files through the engine.
+  Repeated nested discoveries deduplicate by epoch/origin/hash; scan omissions
+  remain visible without exposing deliberately excluded credential paths.
 - `storage_guards.rs` owns foreign/newer schema preservation, independent SQLite
   connection exclusion and immutable workspace/provider binding.
 - `migration.rs` starts with the actual M0 schema and saved messages, upgrades
@@ -45,6 +52,8 @@ unchanged. The Rust Windows job retains the credential-free scripted CLI smoke.
   death. Taking the OS lock marks stale work interrupted, and explicit resume
   retains attempt accounting. `crash_fixture_child` is that subprocess entry,
   not a placeholder feature test. This is separate from #12's process launcher.
+  Recovery errors expose saved IDs and the original data directory; unavailable
+  recovery stores fail closed without silently creating an empty replacement.
 - `persistence_failure.rs` injects SQLite transaction aborts at intent/result and
   terminal writes. The exact failure is observed; no new model request follows
   failed persistence. Reopen closes unfinished inspections truthfully. An already

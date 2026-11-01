@@ -26,6 +26,12 @@ pub enum Error {
     Schema,
     #[error("workspace or session has unresolved work")]
     Busy,
+    #[error("{0}")]
+    UnresolvedWork(UnresolvedWork),
+    #[error(
+        "recovery database unavailable in original --data-dir {data_dir:?}; restore it before resuming or abandoning work"
+    )]
+    RecoveryStoreUnavailable { data_dir: std::path::PathBuf },
     #[error("session binding does not match this engine")]
     Binding,
     #[error("record not found")]

@@ -226,10 +226,13 @@ impl TurnRun {
                     let workspace = Workspace::new(&self.config);
                     let name = call.name;
                     let args = call.arguments;
+                    let known = journal::instruction_keys(&self.store, self.turn).await?;
                     // Read-only blocking work is bounded and joined even on cancellation.
-                    tokio::task::spawn_blocking(move || workspace.execute(&name, &args).to_string())
-                        .await
-                        .map_err(|_| Error::Worker)?
+                    tokio::task::spawn_blocking(move || {
+                        workspace.execute(&name, &args, &known).to_string()
+                    })
+                    .await
+                    .map_err(|_| Error::Worker)?
                 };
                 if result.len() > self.config.max_output_bytes.saturating_sub(output) {
                     stop = Some(StopReason::OutputLimit);

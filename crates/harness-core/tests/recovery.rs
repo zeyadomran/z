@@ -81,25 +81,48 @@ async fn process_lock_crosses_data_dirs_and_orphan_requires_explicit_resume() {
     child.kill().unwrap();
     child.wait().unwrap();
     // Released OS lock still cannot bypass an unresolved turn in the other store.
-    assert!(matches!(
-        alternate.submit(alt, "still blocked".into()).await,
-        Err(Error::Busy)
-    ));
+    let error = alternate
+        .submit(alt, "still blocked".into())
+        .await
+        .err()
+        .unwrap();
+    let message = error.to_string();
+    assert!(
+        message.contains(&format!("--session {}", ids[0])),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("--resume-turn {}", ids[1])),
+        "{message}"
+    );
+    assert!(message.contains("harness abandon"), "{message}");
+    let Error::UnresolvedWork(work) = error else {
+        panic!("expected actionable recovery")
+    };
+    assert_eq!(work.session_id, SessionId(ids[0]));
+    assert_eq!(work.turn_id, TurnId(ids[1]));
+    assert_eq!(
+        std::fs::canonicalize(work.data_dir).unwrap(),
+        std::fs::canonicalize(root.path().join("data")).unwrap()
+    );
     let database = root.path().join("data/harness.sqlite");
     let moved = root.path().join("data/owned-missing.sqlite");
     std::fs::rename(&database, &moved).unwrap();
-    assert!(matches!(
-        alternate
-            .submit(alt, "missing unresolved store".into())
-            .await,
-        Err(Error::Busy)
-    ));
+    let missing_error = alternate
+        .submit(alt, "missing unresolved store".into())
+        .await
+        .err()
+        .unwrap();
+    assert!(missing_error.to_string().contains("original --data-dir"));
+    assert!(
+        matches!(missing_error, Error::RecoveryStoreUnavailable { data_dir } if data_dir.ends_with("data"))
+    );
     let missing = Engine::open(
         Config::new(root.path().join("workspace"), root.path().join("data")),
         ScriptedProvider::new(vec![]),
     )
     .await;
-    let refused = matches!(missing, Err(Error::Busy));
+    let refused = matches!(missing, Err(Error::RecoveryStoreUnavailable { .. }));
     if let Ok(mut accidentally_created) = missing {
         accidentally_created.shutdown().await.unwrap();
         std::fs::remove_file(&database).unwrap();
@@ -133,7 +156,7 @@ async fn process_lock_crosses_data_dirs_and_orphan_requires_explicit_resume() {
     let bypass = reopened.create_session().await.unwrap();
     assert!(matches!(
         reopened.submit(bypass, "blocked".into()).await,
-        Err(Error::Busy)
+        Err(Error::UnresolvedWork(work)) if work.session_id == session && work.turn_id == turn
     ));
     assert_eq!(
         reopened

@@ -28,7 +28,7 @@ Example **non-secret** `openrouter.json`:
 ```json
 {
   "model": "~deepseek/deepseek-v4-flash-latest",
-  "upstreams": ["deepseek"],
+  "upstreams": ["deepinfra/fp8"],
   "allow_fallbacks": false,
   "data_collection": "deny",
   "zdr": false,
@@ -53,7 +53,10 @@ account identity belongs to M1b.
 The public catalog checked on 2026-11-01 listed the example model. Recheck the
 latest eligible DeepSeek V4 Flash snapshot and exact endpoint `tag` before
 qualification; model names, endpoints and capabilities may change. The example
-upstream is conditional on its presence in current endpoint metadata. The CLI
+upstream `deepinfra/fp8` was present in the alias target's
+[public endpoint metadata](https://openrouter.ai/api/v1/models/deepseek/deepseek-v4-flash-0731/endpoints)
+on that date. Its availability under the account's privacy settings remains a
+live qualification gate. The CLI
 rejects absent tags, missing capabilities, unsupported reasoning efforts and
 output caps exceeding endpoint limits. It never guesses when discovery fails.
 Override the JSON's model/route with `--model <slug> --upstream <endpoint-tag>`;
@@ -64,6 +67,10 @@ session silently. Use the saved concrete model to continue that session.
 Opaque continuation pins the exact endpoint tag; configurations containing two
 tags with the same display identity are rejected rather than guessed. Missing
 stream provider metadata is usable only when the selected endpoint is unambiguous.
+Routing tags also match endpoint prefixes. A configured tag with catalogued
+descendants is rejected even if it is the only configured tag; select a leaf
+variant/region tag. This conservatively avoids guessing which variants satisfy
+account-specific restrictions.
 
 For this project's manual qualification, only the user-selected latest DeepSeek
 V4 Flash route is authorized. The parent owns secure key acquisition and the
@@ -104,6 +111,14 @@ read after receiving a skipped result. Older M0 sessions remain readable and
 continuable under their original scripted binding and frozen empty tool schema;
 create a new M1a session to use inspection tools.
 
+A provider `length` outcome can exhaust the configured `max_output_tokens`,
+including reasoning, even when visible text is empty. Raise that field explicitly
+in the same provider JSON before resuming; `--max-output-bytes` alone does not
+raise the upstream token cap. The token cap is a mutable host budget, excluded
+from session identity and recorded in each attempt's metadata. Credential,
+resolved model and routing/protocol choices remain bound. The new output reserve
+must still fit the catalog and local context limits; truncated attempts may be billed.
+
 To stop unresolved work instead of resuming it:
 
 ```powershell
@@ -115,6 +130,10 @@ provider configuration, credential or network access. It holds workspace ownersh
 atomically records cancellation and truthful pending inspection results, and
 retains completed results. An already stored final answer remains authoritative.
 It does not change the session's provider/account binding or authorize inference.
+If the original IDs are lost, a new request reports the unresolved session/turn
+IDs and original data directory with recovery guidance. A currently owned
+workspace still reports busy; a missing recovery store identifies its original
+data directory and must be restored before recovery.
 
 Normal stdout streams escaped text. JSON mode (`--json`) emits version 1 NDJSON
 `accepted`, coalesced `progress` snapshots, and a durable `terminal` record with
@@ -143,7 +162,7 @@ cancellation/refund. Local cancellation ends consumption and future tool work.
 | No upstream | Recheck exact endpoint tags, required parameters and privacy settings. |
 | Throttle/transient server/transport | At most two retries per response; Retry-After seconds/dates are honored within the turn deadline. Prior partial display is discarded. |
 | Context/output/request/tool/deadline limit | Explicitly raise the applicable host limit and resume, or abandon locally; context compaction is later work. |
-| Refusal/content filter | Request is refused, with the prompt retained for audit. |
+| Refusal/content filter | The whole refused turn remains in audit history and is excluded from subsequent provider context. |
 | Invalid request/protocol/unknown error | Correct configuration/protocol; deterministic errors are not retried. |
 | Abrupt EOF | Incomplete transport result; partial calls never run. |
 | Persistence failure | No further inspection/request is scheduled. Reopen after fixing storage and explicitly resume interrupted work. |
@@ -174,11 +193,18 @@ text presentation and return bounded line ranges. List/search pages contain at
 most 200 entries; scans cap 10,000 entries, depth 16, five seconds of traversal,
 and 8 MiB searched text. Results cap 64 KiB; instruction content caps 32 KiB per
 result. Oversized operations return an error directing the model to narrow scope.
-Search reports bounded skipped-file reasons and truncation, so unsupported or
-oversized files do not silently appear searched. Root/user instruction snapshots
+List/search report bounded scan omissions and truncation, including inaccessible
+entries, denied links and depth-limited subtrees; search also reports unreadable
+or oversized file omissions. `skipped_count` counts omissions, not the unknown
+number of files beneath an unscanned subtree. Policy-excluded credential and
+generated/VCS paths remain undisclosed. Root/user instruction snapshots
 freeze each epoch; the root snapshot is not repeated in each tool result. Applicable nested AGENTS.md
 snapshots carry origin/hash/content in tool results; they cannot mutate the
-prefix or grant permissions. `--instructions` explicitly loads user preferences.
+prefix or grant permissions. Each nested origin/hash snapshot is appended once
+per epoch while it remains in provider context. Discovery is committed atomically
+with its tool result; failed persistence or a refused turn does not suppress a
+later discovery. Only newly included instruction content consumes output budget.
+`--instructions` explicitly loads user preferences.
 
 Store data outside the workspace in a **private local directory**, normally
 `%LOCALAPPDATA%/z-harness`. Do not choose shared, network or cloud-synchronized
@@ -213,8 +239,12 @@ Checked 2026-11-01 against primary sources:
 - [OpenRouter streaming](https://openrouter.ai/docs/api/reference/streaming):
   fragmented SSE, comments, terminal finish plus `[DONE]`; usage can repeat finish.
 - [Reasoning preservation](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens):
-  assemble indexed text/summary fragments and retain opaque blobs/signatures;
+  assemble consecutive compatible text/summary fragments, seal signed blocks,
+  and retain separate opaque blobs. Indices may be missing or reused, as handled
+  by the [official SDK](https://github.com/OpenRouterTeam/ai-sdk-provider/blob/main/src/chat/index.ts);
   avoid duplicate plain reasoning when structured details carry it.
+  Stream envelopes do not consume payload budgets; per-frame/buffer caps bound
+  parser memory and the engine deadline bounds total stream consumption.
 - [Tool calling](https://openrouter.ai/docs/guides/features/tool-calling) and
   [routing](https://openrouter.ai/docs/guides/routing/provider-selection): matching
   tool_call_id, required parameters, explicit eligible routes and privacy options.

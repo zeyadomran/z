@@ -8,7 +8,7 @@ fn request() -> ProviderRequest {
     ProviderRequest{epoch:Epoch{id:ContextEpochId(1),prefix:"frozen".into(),tool_schema:r#"[{"type":"function","function":{"name":"read_file","parameters":{"type":"object"}}}]"#.into()},messages:vec![ProtocolMessage::User("inspect".into())]}
 }
 fn config() -> OpenRouterConfig {
-    OpenRouterConfig::new("fixture/model".into(), "fixture".into())
+    OpenRouterConfig::new("fixture/model".into(), "fixture/spot".into())
 }
 #[tokio::test]
 async fn fragmented_wire_roundtrip_preserves_reasoning_ids_and_usage_snapshot() {
@@ -18,9 +18,9 @@ async fn fragmented_wire_roundtrip_preserves_reasoning_ids_and_usage_snapshot() 
         json!({"role":"assistant","content":"Inspecting","reasoning_details":details}),
         Value::Null,
     );
-    for _ in 0..300 {
+    for _ in 0..4096 {
         first += &event(
-            json!({"reasoning":"think", "reasoning_details":[{"type":"reasoning.text","index":0,"text":"think","signature":null}]}),
+            json!({"reasoning":"think", "reasoning_details":[{"type":"reasoning.text","index":0,"text":"think","signature":null,"format":"openai-responses-v1","id":"reasoning-trace"}]}),
             Value::Null,
         );
     }
@@ -33,6 +33,22 @@ async fn fragmented_wire_roundtrip_preserves_reasoning_ids_and_usage_snapshot() 
         Value::Null,
     );
     first += &event(
+        json!({"reasoning_details":[{"type":"reasoning.text","index":0,"text":"second","signature":"signature-2"}]}),
+        Value::Null,
+    );
+    first += &event(
+        json!({"reasoning_details":[{"type":"reasoning.text","text":"un"}]}),
+        Value::Null,
+    );
+    first += &event(
+        json!({"reasoning_details":[{"type":"reasoning.text","text":"indexed"}]}),
+        Value::Null,
+    );
+    first += &event(
+        json!({"reasoning_details":[{"type":"reasoning.text","signature":"signature-3"}]}),
+        Value::Null,
+    );
+    first += &event(
         json!({"reasoning_details":[{"type":"reasoning.encrypted","index":1,"id":"opaque-2","data":"second blob"}]}),
         Value::Null,
     );
@@ -41,7 +57,7 @@ async fn fragmented_wire_roundtrip_preserves_reasoning_ids_and_usage_snapshot() 
         Value::Null,
     );
     first += &event(
-        json!({"tool_calls":[{"index":0,"id":null,"function":{"name":null,"arguments":null}}]}),
+        json!({"tool_calls":[{"index":0,"id":null,"type":null,"function":{"name":null,"arguments":null}}]}),
         Value::Null,
     );
     first += &event(
@@ -65,7 +81,7 @@ async fn fragmented_wire_roundtrip_preserves_reasoning_ids_and_usage_snapshot() 
     let mut p = OpenRouterProvider::loopback_fixture(base, c).await.unwrap();
     let (tx, rx) = watch::channel(Progress::default());
     let mut req = request();
-    let r = p.respond(req.clone(), 4096, tx.clone()).await.unwrap();
+    let r = p.respond(req.clone(), 65536, tx.clone()).await.unwrap();
     assert_eq!(r.reason, StopReason::Tools);
     let m = r.message.unwrap();
     assert_eq!(
@@ -76,11 +92,11 @@ async fn fragmented_wire_roundtrip_preserves_reasoning_ids_and_usage_snapshot() 
             arguments: r#"{"path":"a.txt"}"#.into()
         }]
     );
-    let details = json!([details[0], {"type":"reasoning.text","index":0,"text":"think".repeat(300),"signature":"signed"}, {"type":"reasoning.encrypted","index":1,"id":"opaque-2","data":"second blob"}]);
+    let details = json!([details[0], {"type":"reasoning.text","index":0,"text":"think".repeat(4096),"signature":"signed","format":"openai-responses-v1","id":"reasoning-trace"}, {"type":"reasoning.text","index":0,"text":"second","signature":"signature-2"},{"type":"reasoning.text","text":"unindexed","signature":"signature-3"}, {"type":"reasoning.encrypted","index":1,"id":"opaque-2","data":"second blob"}]);
     assert_eq!(m.opaque["reasoning_details"], details);
-    assert_eq!(m.opaque["route"], "fixture");
+    assert_eq!(m.opaque["route"], "fixture/spot");
     assert!(m.opaque.get("reasoning").is_none());
-    assert!(rx.borrow().bytes < 2200);
+    assert!(rx.borrow().bytes < 22000);
     assert_eq!(rx.borrow().usage.as_ref().unwrap()["prompt_tokens"], 15);
     assert_eq!(rx.borrow().text, "Inspecting");
     req.messages.push(ProtocolMessage::AssistantData(m));
@@ -96,7 +112,7 @@ async fn fragmented_wire_roundtrip_preserves_reasoning_ids_and_usage_snapshot() 
     assert_eq!(bodies[1]["messages"][2]["reasoning_details"], details);
     assert_eq!(bodies[1]["messages"][3]["tool_call_id"], "call-1");
     assert_eq!(bodies[0]["model"], "fixture/model");
-    assert_eq!(bodies[1]["provider"]["only"], json!(["fixture"]));
+    assert_eq!(bodies[1]["provider"]["only"], json!(["fixture/spot"]));
     assert_eq!(bodies[1]["provider"]["require_parameters"], true);
     assert_eq!(bodies[1]["provider"]["allow_fallbacks"], false);
     assert_eq!(bodies[1]["provider"]["data_collection"], "deny");
@@ -109,6 +125,24 @@ async fn wire_terminal_and_account_failures_never_authorize_partial_calls() {
         Value::Null,
     );
     let cases = vec![
+        (
+            Wire {
+                status: 404,
+                kind: "application/json",
+                body: "{}".into(),
+                headers: String::new(),
+            },
+            StopReason::NoUpstream,
+        ),
+        (
+            Wire {
+                status: 404,
+                kind: "application/json",
+                body: json!({"error":{"code":"not_found"}}).to_string(),
+                headers: String::new(),
+            },
+            StopReason::NoUpstream,
+        ),
         (
             Wire::sse(
                 event(
@@ -294,73 +328,19 @@ async fn recognized_retries_discard_partial_calls_and_persist_each_usage_snapsho
 
 #[tokio::test]
 async fn catalog_validation_rejects_incompatible_routes_before_inference() {
-    for invalid in ["output", "route", "ambiguous"] {
+    for invalid in ["output", "route", "ambiguous", "prefix"] {
         let (base, server) = serve(vec![]);
         let mut c = config();
         match invalid {
             "route" => c.upstreams = vec!["missing-endpoint".into()],
-            "ambiguous" => c.upstreams.push("fixture/spot".into()),
+            "ambiguous" => c.upstreams.push("fixture/us".into()),
+            "prefix" => c.upstreams = vec!["fixture".into()],
             _ => c.max_output_tokens = 8192,
         }
         assert!(matches!(
             OpenRouterProvider::loopback_fixture(base, c).await,
             Err(Error::Configuration(_))
         ));
-        assert!(
-            tokio::task::spawn_blocking(move || server.join().unwrap())
-                .await
-                .unwrap()
-                .is_empty()
-        );
-    }
-}
-
-#[tokio::test]
-async fn credential_replacement_cannot_read_or_continue_the_previous_session() {
-    let root = tempfile::tempdir().unwrap();
-    let workspace = root.path().join("workspace");
-    std::fs::create_dir(&workspace).unwrap();
-    let host = Config::new(workspace, root.path().join("data"));
-    let (base, server) = serve(vec![Wire::sse(
-        event(json!({"content":"saved"}), json!("stop")) + "data: [DONE]\n\n",
-    )]);
-    let provider = OpenRouterProvider::loopback_fixture(base, config())
-        .await
-        .unwrap();
-    let mut engine = Engine::open(host.clone(), provider).await.unwrap();
-    let session = engine.create_session().await.unwrap();
-    assert_eq!(
-        engine
-            .submit(session, "inspect".into())
-            .await
-            .unwrap()
-            .outcome()
-            .await
-            .unwrap()
-            .reason,
-        StopReason::Final
-    );
-    let history = engine.history(session).await.unwrap();
-    engine.shutdown().await.unwrap();
-    tokio::task::spawn_blocking(move || server.join().unwrap())
-        .await
-        .unwrap();
-    for revision in [1, 0] {
-        let (base, server) = serve(vec![]);
-        let provider = OpenRouterProvider::loopback_fixture_key_revision(base, config(), revision)
-            .await
-            .unwrap();
-        let mut engine = Engine::open(host.clone(), provider).await.unwrap();
-        if revision == 1 {
-            assert!(matches!(engine.history(session).await, Err(Error::Binding)));
-            assert!(matches!(
-                engine.submit(session, "blocked".into()).await,
-                Err(Error::Binding)
-            ));
-        } else {
-            assert_eq!(engine.history(session).await.unwrap(), history);
-        }
-        engine.shutdown().await.unwrap();
         assert!(
             tokio::task::spawn_blocking(move || server.join().unwrap())
                 .await

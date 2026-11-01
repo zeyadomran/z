@@ -51,7 +51,9 @@ pub(crate) fn request(c: &Connection, session: SessionId) -> Result<ProviderRequ
             })
         },
     )?;
-    let mut q=c.prepare("SELECT p.payload FROM protocol_messages p JOIN turns t ON t.id=p.turn_id WHERE t.session_id=?1 AND p.epoch_id=?2 ORDER BY p.id")?;
+    // Refusal retains the complete audit trail, but none of that turn's protocol
+    // belongs in later provider input. Keep other turns' closed call/result pairs.
+    let mut q=c.prepare("SELECT p.payload FROM protocol_messages p JOIN turns t ON t.id=p.turn_id WHERE t.session_id=?1 AND p.epoch_id=?2 AND t.state!='refused' ORDER BY p.id")?;
     let rows = q.query_map(params![session.0, epoch.id.0], |r| r.get::<_, String>(0))?;
     let messages = rows
         .map(|r| Ok(serde_json::from_str(&r?)?))
@@ -69,7 +71,7 @@ pub(crate) async fn start(
     store.call(move |c| {
         let tx=c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         binding(&tx,session,&workspace,&b)?;
-        if unresolved(&tx,&workspace)? { return Err(Error::Busy); }
+        if let Some(work) = unresolved(&tx,&workspace)? { return Err(Error::UnresolvedWork(work)); }
         let epoch:i64=tx.query_row("SELECT id FROM epochs WHERE session_id=?1 AND state='active'",[session.0],|r|r.get(0))?;
         tx.execute("INSERT INTO turns(session_id,workspace,epoch_id,state,limits) VALUES(?1,?2,?3,'running',?4)",params![session.0,workspace,epoch,limits])?;
         let turn=TurnId(tx.last_insert_rowid());
@@ -79,8 +81,20 @@ pub(crate) async fn start(
         tx.commit()?; Ok((turn,request,sequence))
     }).await
 }
-pub(crate) fn unresolved(c: &Connection, workspace: &str) -> Result<bool> {
-    Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM turns WHERE workspace=?1 AND state IN ('running','awaiting_approval','suspended_limit','suspended_recovery','interrupted'))",[workspace],|r|r.get(0))?)
+pub(crate) fn unresolved(c: &Connection, workspace: &str) -> Result<Option<UnresolvedWork>> {
+    let ids = c.query_row("SELECT session_id,id FROM turns WHERE workspace=?1 AND state IN ('running','awaiting_approval','suspended_limit','suspended_recovery','interrupted') ORDER BY id LIMIT 1", [workspace], |r| Ok((SessionId(r.get(0)?), TurnId(r.get(1)?)))).optional()?;
+    ids.map(|(session_id, turn_id)| {
+        let data_dir = std::path::Path::new(c.path().ok_or(Error::Worker)?)
+            .parent()
+            .ok_or(Error::Worker)?
+            .to_path_buf();
+        Ok(UnresolvedWork {
+            session_id,
+            turn_id,
+            data_dir,
+        })
+    })
+    .transpose()
 }
 pub(crate) fn append(tx: &Transaction<'_>, turn: TurnId, message: &ProtocolMessage) -> Result<i64> {
     tx.execute("INSERT INTO protocol_messages(turn_id,epoch_id,payload) SELECT id,epoch_id,?1 FROM turns WHERE id=?2",params![serde_json::to_string(message)?,turn.0])?;

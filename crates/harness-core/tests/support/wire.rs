@@ -45,6 +45,12 @@ pub fn serve(responses: Vec<Wire>) -> (String, JoinHandle<Vec<Value>>) {
             .as_array_mut()
             .unwrap()
             .push(duplicate);
+        let mut regional = endpoints["data"]["endpoints"][0].clone();
+        regional["tag"] = json!("fixture/us");
+        endpoints["data"]["endpoints"]
+            .as_array_mut()
+            .unwrap()
+            .push(regional);
         let mut other = endpoints["data"]["endpoints"][0].clone();
         other["tag"] = json!("fixture-other");
         other["provider_name"] = json!("Other");

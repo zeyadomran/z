@@ -287,9 +287,11 @@ fn guidance(r: &StopReason) -> &'static str {
         StopReason::ContextLimit
         | StopReason::RequestLimit
         | StopReason::ToolLimit
-        | StopReason::OutputLimit
         | StopReason::Deadline => {
             "Turn suspended. Resume with --session and --resume-turn, raising the relevant limit, or use `harness abandon --workspace ... --session ... --turn ...`. Compaction is not available yet."
+        }
+        StopReason::OutputLimit => {
+            "Turn suspended. For provider token exhaustion, raise max_output_tokens in the provider JSON; for cumulative local output, raise --max-output-bytes. Resume with --session and --resume-turn, or abandon locally. Reasoning counts toward the provider cap; prior attempts may be billable."
         }
         StopReason::Protocol | StopReason::InvalidRequest => {
             "Provider protocol/configuration failure. Partial calls were not executed; inspect adapter configuration before retrying."

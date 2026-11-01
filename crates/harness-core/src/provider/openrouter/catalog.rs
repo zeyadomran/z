@@ -103,6 +103,19 @@ pub(super) async fn fetch(client: &Client, base: &str, c: &OpenRouterConfig) -> 
         .ok_or_else(|| config_error("model endpoint metadata unavailable"))?;
     let mut routes = BTreeMap::new();
     for slug in &c.upstreams {
+        // Routing fields match prefixes, not just the catalog row whose tag is
+        // equal. Reject a prefix whenever the catalog also exposes descendants;
+        // do not guess which variants account/privacy filters would eliminate.
+        let prefix = format!("{slug}/");
+        if list.iter().any(|e| {
+            e["tag"]
+                .as_str()
+                .is_some_and(|tag| tag.starts_with(&prefix))
+        }) {
+            return Err(config_error(
+                "upstream tag covers multiple endpoint variants; select a leaf endpoint tag",
+            ));
+        }
         let endpoint = list.iter().find(|e| e["tag"] == *slug).ok_or_else(|| {
             config_error("upstream slug absent; use an exact catalog endpoint tag")
         })?;

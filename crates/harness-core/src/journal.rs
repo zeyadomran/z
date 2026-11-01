@@ -146,10 +146,27 @@ pub(crate) async fn tool_result(
 ) -> Result<()> {
     s.call(move|c|{
     let tx=c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let value: serde_json::Value = serde_json::from_str(&result)?;
+    if let Some(instructions) = value.get("instructions") {
+        for i in serde_json::from_value::<Vec<Instruction>>(instructions.clone())? {
+            tx.execute("INSERT OR IGNORE INTO instructions SELECT epoch_id,?1,?2,?3 FROM turns WHERE id=?4", params![i.origin,i.sha256,i.content,t.0])?;
+        }
+    }
     if tx.execute("UPDATE tool_calls SET state='resolved',result=?1 WHERE batch_id=?2 AND provider_id=?3 AND state!='resolved'",params![result,batch,id])?!=1{return Err(Error::Persistence("tool result conflict".into()));}
     tx.execute("UPDATE turns SET output_bytes=output_bytes+?1,active_ms=MAX(active_ms,?2) WHERE id=?3",params![result.len() as i64,ms,t.0])?;
     event(&tx,session,t,EventKind::ToolFinished{turn_id:t,call_id:id})?;tx.commit()?;Ok(())
 }).await
+}
+/// Only suppress snapshots that still belong to provider context, including
+/// accepted results in the current open batch. Refused turns remain audit-only.
+pub(crate) async fn instruction_keys(
+    s: &Store,
+    t: TurnId,
+) -> Result<std::collections::BTreeSet<(String, String)>> {
+    s.call(move |c| {
+        let mut q = c.prepare("SELECT DISTINCT i.origin,i.sha256 FROM instructions i JOIN turns t ON t.epoch_id=i.epoch_id JOIN tool_calls tc ON tc.turn_id=t.id JOIN json_each(tc.result,'$.instructions') j WHERE i.epoch_id=(SELECT epoch_id FROM turns WHERE id=?1) AND t.state!='refused' AND json_extract(j.value,'$.origin')=i.origin AND json_extract(j.value,'$.sha256')=i.sha256")?;
+        Ok(q.query_map([t.0], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<std::result::Result<_, _>>()?)
+    }).await
 }
 pub(crate) async fn close(
     s: &Store,

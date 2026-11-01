@@ -7,11 +7,18 @@ async fn failed_intent_or_result_commit_stops_work_and_reconciles_closed_history
         let w = root.path().join("workspace");
         std::fs::create_dir(&w).unwrap();
         std::fs::write(w.join("file.txt"), "original").unwrap();
+        std::fs::create_dir(w.join("nested")).unwrap();
+        std::fs::write(w.join("nested/file.txt"), "nested original").unwrap();
+        std::fs::write(
+            w.join("nested/AGENTS.md"),
+            "must survive failed persistence",
+        )
+        .unwrap();
         let config = Config::new(w.clone(), root.path().join("data"));
         let call = ToolCall {
             id: "read".into(),
             name: "read_file".into(),
-            arguments: r#"{"path":"file.txt"}"#.into(),
+            arguments: r#"{"path":"nested/file.txt"}"#.into(),
         };
         let mut engine = Engine::open(
             config.clone(),
@@ -21,6 +28,7 @@ async fn failed_intent_or_result_commit_stops_work_and_reconciles_closed_history
                     ScriptFrame::ToolCall(
                         serde_json::to_string(&ToolCall {
                             id: "kept".into(),
+                            arguments: r#"{"path":"file.txt"}"#.into(),
                             ..call.clone()
                         })
                         .unwrap(),
@@ -124,6 +132,48 @@ async fn failed_intent_or_result_commit_stops_work_and_reconciles_closed_history
             };
             assert!(result.contains("cancelled before inspection"));
         }
+        reopened.shutdown().await.unwrap();
+        let mut reopened = Engine::open(
+            config,
+            ScriptedProvider::new(vec![
+                ScriptStep {
+                    expected_prompt: "inspect again".into(),
+                    frames: vec![
+                        ScriptFrame::ToolCall(
+                            serde_json::to_string(&ToolCall {
+                                id: "new-read".into(),
+                                ..call
+                            })
+                            .unwrap(),
+                        ),
+                        ScriptFrame::Complete,
+                    ],
+                },
+                ScriptStep::reply("inspect again", "done"),
+            ]),
+        )
+        .await
+        .unwrap();
+        let mut next = reopened
+            .submit(session, "inspect again".into())
+            .await
+            .unwrap();
+        assert_eq!(next.outcome().await.unwrap().state, TurnState::Completed);
+        let request = reopened.protocol_history(session).await.unwrap();
+        let result = request
+            .messages
+            .iter()
+            .find_map(|m| match m {
+                ProtocolMessage::ToolResult { call_id, result } if call_id == "new-read" => {
+                    Some(serde_json::from_str::<serde_json::Value>(result).unwrap())
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            result["instructions"][0]["content"],
+            "must survive failed persistence"
+        );
         reopened.shutdown().await.unwrap();
     }
 }

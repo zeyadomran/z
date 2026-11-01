@@ -63,7 +63,7 @@ async fn configured_limits_suspend_without_persisting_partial_response() {
             reopened
                 .submit(new_session, "cannot bypass suspension".into())
                 .await,
-            Err(Error::Busy)
+            Err(Error::UnresolvedWork(work)) if work.session_id == session && work.turn_id == turn.id
         ));
         let attempts = reopened.usage(session).await.unwrap().len();
         let cancelled = reopened.abandon(session, turn.id).await.unwrap();

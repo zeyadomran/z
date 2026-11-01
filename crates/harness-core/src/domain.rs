@@ -11,6 +11,23 @@ id!(TurnId);
 id!(ContextEpochId);
 id!(EventSequence);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedWork {
+    pub session_id: SessionId,
+    pub turn_id: TurnId,
+    pub data_dir: std::path::PathBuf,
+}
+
+impl std::fmt::Display for UnresolvedWork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unresolved workspace work: use original --data-dir {:?}; resume with --session {} --resume-turn {}, or use harness abandon --session {} --turn {} with the same workspace and data directory",
+            self.data_dir, self.session_id.0, self.turn_id.0, self.session_id.0, self.turn_id.0
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnState {

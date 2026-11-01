@@ -211,6 +211,7 @@ impl OpenRouterProvider {
             p.model = None;
             p.upstream = None;
             p.bytes = 0;
+            p.output_token_limit = Some(self.config.max_output_tokens);
         });
         super::scripted::validate(&request)?;
         if self.metadata.retrieved.elapsed().unwrap_or(Duration::MAX) > Duration::from_secs(3600) {
@@ -329,6 +330,13 @@ fn transport(e: &reqwest::Error) -> StopReason {
 }
 impl Provider for OpenRouterProvider {
     fn binding(&self) -> ProviderBinding {
+        let mut options = serde_json::to_value(&self.config).expect("serializable config");
+        // This is a host budget, not account/model/routing identity. Explicitly
+        // changing it on reopen must permit recovery from a truncated response.
+        options
+            .as_object_mut()
+            .expect("config object")
+            .remove("max_output_tokens");
         ProviderBinding {
             provider: "openrouter".into(),
             account_ref: format!(
@@ -336,7 +344,7 @@ impl Provider for OpenRouterProvider {
                 self.config.credential_env, self.credential_identity
             ),
             model: self.config.model.clone(),
-            options: serde_json::to_string(&self.config).expect("serializable config"),
+            options: options.to_string(),
         }
     }
     fn capabilities(&self) -> Capabilities {

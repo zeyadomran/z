@@ -19,7 +19,7 @@ impl WorkspaceLock {
         tokio::task::spawn_blocking(move || {
             let (file, previous) = lock_record(&identity)?;
             if !previous.is_empty() && Path::new(&previous) == database && !database.exists() {
-                return Err(Error::Busy);
+                return Err(missing_store(&previous));
             }
             Ok(Some(file))
         })
@@ -30,9 +30,10 @@ impl WorkspaceLock {
     /// has no unresolved work, while retaining the OS lock through the flush.
     pub async fn release_if_resolved(self, store: &Store, workspace: &str) -> Result<()> {
         let workspace = workspace.to_owned();
-        if !store
+        if store
             .call(move |c| records::unresolved(c, &workspace))
             .await?
+            .is_none()
         {
             tokio::task::spawn_blocking(move || {
                 self._file.set_len(0).map_err(|_| Error::Busy)?;
@@ -56,7 +57,7 @@ impl WorkspaceLock {
         if !previous.is_empty() && Path::new(&previous) != database {
             // A missing prior store cannot prove its unresolved work was resolved.
             if !Path::new(&previous).is_file() {
-                return Err(Error::Busy);
+                return Err(missing_store(&previous));
             }
             let (store, worker) = Store::open(previous.clone().into()).await?;
             let w = workspace.to_owned();
@@ -66,8 +67,8 @@ impl WorkspaceLock {
                 .await
                 .map_err(|_| Error::Worker)?
                 .map_err(|_| Error::Worker)?;
-            if busy? {
-                return Err(Error::Busy);
+            if let Some(work) = busy? {
+                return Err(Error::UnresolvedWork(work));
             }
         }
         if Path::new(&previous) == database {
@@ -79,6 +80,14 @@ impl WorkspaceLock {
             .map_err(|_| Error::Busy)?;
         file.sync_all().map_err(|_| Error::Busy)?;
         Ok(Self { _file: file })
+    }
+}
+fn missing_store(database: &str) -> Error {
+    Error::RecoveryStoreUnavailable {
+        data_dir: Path::new(database)
+            .parent()
+            .unwrap_or_else(|| Path::new(database))
+            .to_path_buf(),
     }
 }
 fn lock_record(identity: &str) -> Result<(File, String)> {

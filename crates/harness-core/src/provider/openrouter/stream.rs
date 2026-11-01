@@ -8,7 +8,6 @@ pub(super) struct Stream {
     finish: Option<String>,
     refused: bool,
     bytes: usize,
-    wire: usize,
     limit: usize,
     model: String,
     canonical: String,
@@ -34,7 +33,6 @@ impl Stream {
             finish: None,
             refused: false,
             bytes: 0,
-            wire: 0,
             limit,
             model,
             canonical,
@@ -43,10 +41,8 @@ impl Stream {
         }
     }
     pub fn feed(&mut self, bytes: &[u8]) -> Result<Option<ProviderResponse>> {
-        self.wire = self.wire.saturating_add(bytes.len());
-        if self.wire > self.limit.saturating_mul(16).saturating_add(65536) {
-            return Ok(Some(ProviderResponse::stopped(StopReason::OutputLimit)));
-        }
+        // Stream envelopes are not model payload. Memory is bounded by the
+        // frame/buffer caps below; the engine deadline bounds total consumption.
         self.buffer.extend_from_slice(bytes);
         while let Some(end) = self.buffer.iter().position(|b| *b == b'\n' || *b == b'\r') {
             if self.buffer[end] == b'\r' && end + 1 == self.buffer.len() {
@@ -193,7 +189,7 @@ impl Stream {
                     .as_u64()
                     .filter(|n| *n < 60)
                     .ok_or_else(protocol)? as usize;
-                if let Some(kind) = call.get("type")
+                if let Some(kind) = call.get("type").filter(|v| !v.is_null())
                     && kind != "function"
                 {
                     return Err(protocol());
@@ -354,6 +350,7 @@ pub(super) fn error_reason(status: u16, value: &Value) -> StopReason {
         .as_str()
         .or_else(|| value["error"]["code"].as_str());
     match typed {
+        Some("not_found") if status == 404 => StopReason::NoUpstream,
         Some("context_length_exceeded" | "context_length" | "input_too_long") => {
             StopReason::ContextLimit
         }
@@ -391,8 +388,8 @@ pub(super) fn error_reason(status: u16, value: &Value) -> StopReason {
             408 => StopReason::RetryableTransport,
             429 => StopReason::Throttled,
             500 | 502 | 504 => StopReason::Unavailable,
-            503 => StopReason::NoUpstream,
-            400 | 404 | 422 => StopReason::InvalidRequest,
+            404 | 503 => StopReason::NoUpstream,
+            400 | 422 => StopReason::InvalidRequest,
             _ => StopReason::Protocol,
         },
     }

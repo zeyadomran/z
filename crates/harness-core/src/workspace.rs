@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeSet,
     fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
@@ -10,6 +11,7 @@ use std::{
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod native;
+mod scan;
 
 pub(crate) fn hash(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
@@ -223,9 +225,14 @@ impl Workspace {
         ))
     }
     pub fn instructions(&self, input: &str) -> Result<Vec<Instruction>> {
-        self.load_instructions(input, true)
+        self.load_instructions(input, true, &BTreeSet::new())
     }
-    fn load_instructions(&self, input: &str, include_root: bool) -> Result<Vec<Instruction>> {
+    fn load_instructions(
+        &self,
+        input: &str,
+        include_root: bool,
+        known: &BTreeSet<(String, String)>,
+    ) -> Result<Vec<Instruction>> {
         self.resolve(input)?;
         // The root snapshot already belongs to the immutable epoch prefix.
         let mut dirs = if include_root {
@@ -253,6 +260,9 @@ impl Workspace {
             };
             if self.root.join(&path).exists() {
                 let (content, sha256, _, _) = self.read(&path)?;
+                if known.contains(&(path.clone(), sha256.clone())) {
+                    continue;
+                }
                 total += content.len();
                 if total > 32768 {
                     return Err(Error::Scope("instructions exceed 32 KiB".into()));
@@ -266,13 +276,23 @@ impl Workspace {
         }
         Ok(result)
     }
-    pub fn execute(&self, name: &str, arguments: &str) -> Value {
-        match self.tool(name, arguments) {
+    pub fn execute(
+        &self,
+        name: &str,
+        arguments: &str,
+        known: &BTreeSet<(String, String)>,
+    ) -> Value {
+        match self.tool(name, arguments, known) {
             Ok(v) => v,
             Err(e) => json!({"error":e.to_string()}),
         }
     }
-    fn tool(&self, name: &str, arguments: &str) -> Result<Value> {
+    fn tool(
+        &self,
+        name: &str,
+        arguments: &str,
+        known: &BTreeSet<(String, String)>,
+    ) -> Result<Value> {
         if arguments.len() > 256 * 1024 {
             return Err(Error::Scope("tool arguments exceed 256 KiB".into()));
         }
@@ -283,7 +303,7 @@ impl Workspace {
                 "limit must be 1..200; offset <=1000000".into(),
             ));
         }
-        let mut instructions = self.load_instructions(&args.path, false)?;
+        let mut instructions = self.load_instructions(&args.path, false, known)?;
         let value = match name {
             "read_file" if args.query.is_none() => {
                 let (text, sha256, bom, newline) = self.read(&args.path)?;
@@ -291,12 +311,21 @@ impl Workspace {
                 json!({"path":args.path,"sha256":sha256,"bom":bom,"newline":newline,"offset":args.offset,"text":lines.join("\n"),"next_offset":(text.lines().count()>args.offset+lines.len()).then_some(args.offset+lines.len())})
             }
             "list_files" if args.query.is_none() => {
-                let paths = self.files(&args.path)?;
-                let page: Vec<_> = paths.iter().skip(args.offset).take(args.limit).collect();
+                let scan = self.files(&args.path)?;
+                let page: Vec<_> = scan
+                    .paths
+                    .iter()
+                    .skip(args.offset)
+                    .take(args.limit)
+                    .collect();
                 for path in &page {
-                    instructions.extend(self.load_instructions(path, false)?);
+                    instructions.extend(self.load_instructions(path, false, known)?);
                 }
-                json!({"entries":page,"next_offset":(paths.len()>args.offset+page.len()).then_some(args.offset+page.len())})
+                let more = scan.paths.len() > args.offset + page.len();
+                let mut value =
+                    json!({"entries":page,"next_offset":more.then_some(args.offset+page.len())});
+                scan.omissions.apply(&mut value, more);
+                value
             }
             "search_text" => {
                 let query = args
@@ -307,20 +336,18 @@ impl Workspace {
                 let mut matched = 0usize;
                 let mut instruction_paths = std::collections::BTreeSet::new();
                 let mut inspected = 0;
-                let mut skipped_count = 0;
-                let mut skipped_files = Vec::new();
+                let scan = self.files(&args.path)?;
+                let mut omissions = scan.omissions;
                 let started = std::time::Instant::now();
-                for path in self.files(&args.path)? {
+                for path in scan.paths {
                     if started.elapsed() > std::time::Duration::from_secs(5) {
-                        return Err(Error::Scope("search scan cap reached; narrow path".into()));
+                        omissions.record(&path, "search scan cap reached; remaining files omitted");
+                        break;
                     }
                     let text = match self.read(&path) {
                         Ok((text, _, _, _)) => text,
                         Err(error) => {
-                            skipped_count += 1;
-                            if skipped_files.len() < 20 {
-                                skipped_files.push(json!({"path":path,"reason":error.to_string()}));
-                            }
+                            omissions.record(&path, &error.to_string());
                             continue;
                         }
                     };
@@ -328,7 +355,8 @@ impl Workspace {
                     if inspected > 8 * 1024 * 1024
                         || started.elapsed() > std::time::Duration::from_secs(5)
                     {
-                        return Err(Error::Scope("search scan cap reached; narrow path".into()));
+                        omissions.record(&path, "search scan cap reached; remaining files omitted");
+                        break;
                     }
                     for (line, text) in text.lines().enumerate() {
                         if text.contains(&query) {
@@ -340,7 +368,8 @@ impl Workspace {
                                     ));
                                 }
                                 if instruction_paths.insert(path.clone()) {
-                                    instructions.extend(self.load_instructions(&path, false)?);
+                                    instructions
+                                        .extend(self.load_instructions(&path, false, known)?);
                                 }
                                 matches.push(json!({"path":path,"line":line+1,"text":text}));
                             }
@@ -354,7 +383,10 @@ impl Workspace {
                         break;
                     }
                 }
-                json!({"matches":matches.iter().take(args.limit).collect::<Vec<_>>(),"next_offset":(matches.len()>args.limit).then_some(args.offset+args.limit),"truncated":skipped_count>0 || matches.len()>args.limit,"skipped_count":skipped_count,"skipped_details_truncated":skipped_count>skipped_files.len(),"skipped_files":skipped_files})
+                let more = matches.len() > args.limit;
+                let mut value = json!({"matches":matches.iter().take(args.limit).collect::<Vec<_>>(),"next_offset":more.then_some(args.offset+args.limit)});
+                omissions.apply(&mut value, more);
+                value
             }
             _ => {
                 return Err(Error::Scope(
@@ -376,54 +408,6 @@ impl Workspace {
             ));
         }
         Ok(result)
-    }
-    fn files(&self, input: &str) -> Result<Vec<String>> {
-        let start = self.resolve(input)?;
-        if start.is_file() {
-            self.open_verified(&start)?;
-            return Ok(vec![input.into()]);
-        }
-        let mut queue = vec![start];
-        let mut files = Vec::new();
-        let mut visited = 0;
-        let started = std::time::Instant::now();
-        while let Some(dir) = queue.pop() {
-            for entry in fs::read_dir(dir).map_err(io_error)? {
-                let entry = entry.map_err(io_error)?;
-                visited += 1;
-                if visited > 10000 || started.elapsed() > std::time::Duration::from_secs(5) {
-                    return Err(Error::Scope(
-                        "directory scan cap reached; narrow path".into(),
-                    ));
-                }
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if credential(&name) || ignored(&name) {
-                    continue;
-                }
-                let meta = fs::symlink_metadata(entry.path()).map_err(io_error)?;
-                if link(&meta) {
-                    continue;
-                }
-                let path = entry
-                    .path()
-                    .strip_prefix(&self.root)
-                    .map_err(|_| denied())?
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                if self.resolve(&path).is_err() {
-                    continue;
-                }
-                if meta.is_dir() {
-                    if path.split('/').count() < 16 {
-                        queue.push(entry.path());
-                    }
-                } else if meta.is_file() && self.open_verified(&entry.path()).is_ok() {
-                    files.push(path);
-                }
-            }
-        }
-        files.sort();
-        Ok(files)
     }
 }
 

@@ -30,14 +30,34 @@ pub(super) fn append(opaque: &mut Value, delta: &Map<String, Value>) -> Result<(
                     Some("reasoning.summary") => Some("summary"),
                     _ => None,
                 };
-                let previous = detail["index"].as_u64().and_then(|index| {
-                    assembled
-                        .iter_mut()
-                        .find(|v| v["index"].as_u64() == Some(index) && v["type"] == detail["type"])
+                // Indices are optional and can be reused across logical blocks.
+                // Only consecutive compatible fragments merge; a signature seals
+                // its text block. Never search backwards across sealed/opaque data.
+                if let Some(last) = assembled.last()
+                    && payload == Some("text")
+                    && last["type"] == detail["type"]
+                    && detail["text"].as_str().is_none_or(str::is_empty)
+                    && detail["signature"].as_str().is_some_and(|s| !s.is_empty())
+                    && fields
+                        .iter()
+                        .all(|(k, v)| v.is_null() || last.get(k) == Some(v))
+                {
+                    continue;
+                }
+                let previous = assembled.last_mut().filter(|last| {
+                    last["type"] == detail["type"]
+                        && (payload != Some("text")
+                            || last["signature"].as_str().is_none_or(str::is_empty))
+                        && ["id", "format"].iter().all(|key| {
+                            last.get(*key)
+                                .filter(|v| !v.is_null())
+                                .zip(detail.get(*key).filter(|v| !v.is_null()))
+                                .is_none_or(|(a, b)| a == b)
+                        })
                 });
                 if let (Some(payload), Some(previous)) = (payload, previous) {
                     for (key, value) in fields {
-                        if value.is_null() {
+                        if value.is_null() || key == "index" {
                             continue;
                         }
                         if key == payload {
@@ -59,7 +79,7 @@ pub(super) fn append(opaque: &mut Value, delta: &Map<String, Value>) -> Result<(
                         }
                     }
                 } else {
-                    // Encrypted/unknown opaque types and unindexed blocks stay intact.
+                    // Encrypted/unknown opaque types remain separate and intact.
                     assembled.push(detail.clone());
                 }
             }

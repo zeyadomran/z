@@ -67,6 +67,9 @@ pub struct Progress {
     pub attempt: usize,
     #[serde(default)]
     pub discarded_attempts: usize,
+    /// Explicit host-selected provider output cap for this attempt, not identity.
+    #[serde(default)]
+    pub output_token_limit: Option<usize>,
     pub text: String,
     pub usage: Option<Value>,
     pub generation_id: Option<String>,
