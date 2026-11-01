@@ -9,6 +9,18 @@ pub struct Config {
     pub turn_timeout: Duration,
     pub max_prompt_bytes: usize,
     pub max_output_bytes: usize,
+    pub max_model_attempts: usize,
+    pub max_tool_calls: usize,
+    pub max_request_bytes: usize,
+    pub context_tokens: usize,
+    pub user_instructions: Option<PathBuf>,
+    pub policy: Policy,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Policy {
+    Inspect,
+    Supervised,
 }
 
 impl Config {
@@ -19,6 +31,12 @@ impl Config {
             turn_timeout: Duration::from_secs(1200),
             max_prompt_bytes: 64 * 1024,
             max_output_bytes: 256 * 1024,
+            max_model_attempts: 30,
+            max_tool_calls: 60,
+            max_request_bytes: 512 * 1024,
+            context_tokens: 128_000,
+            user_instructions: None,
+            policy: Policy::Inspect,
         }
     }
 
@@ -27,6 +45,10 @@ impl Config {
             || self.turn_timeout > Duration::from_secs(86400)
             || !(1..=1024 * 1024).contains(&self.max_prompt_bytes)
             || !(1..=16 * 1024 * 1024).contains(&self.max_output_bytes)
+            || !(1..=100).contains(&self.max_model_attempts)
+            || !(1..=200).contains(&self.max_tool_calls)
+            || !(1024..=4 * 1024 * 1024).contains(&self.max_request_bytes)
+            || !(4096..=2_000_000).contains(&self.context_tokens)
         {
             return Err(Error::Configuration(
                 "limits must be positive and bounded (24h, 1 MiB prompt, 16 MiB output)".into(),
@@ -86,13 +108,19 @@ impl Config {
             "turn_timeout_ms": self.turn_timeout.as_millis(),
             "max_prompt_bytes": self.max_prompt_bytes,
             "max_output_bytes": self.max_output_bytes,
-            "max_model_attempts": 1,
-            "max_tool_calls": 0
+            "max_model_attempts": self.max_model_attempts,
+            "max_tool_calls": self.max_tool_calls,
+            "max_request_bytes": self.max_request_bytes,
+            "context_tokens": self.context_tokens
         }))?)
     }
 }
 
 fn network_path(path: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    if !crate::workspace::local_volume(path) {
+        return true;
+    }
     let text = path.to_string_lossy().replace('/', "\\").to_uppercase();
     text.starts_with("\\\\?\\UNC\\") || (text.starts_with("\\\\") && !text.starts_with("\\\\?\\"))
 }

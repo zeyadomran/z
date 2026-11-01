@@ -117,3 +117,90 @@ async fn invalid_configuration_and_prompt_are_rejected_before_acceptance() {
     ));
     engine.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn request_tool_and_context_caps_preserve_closed_batches_across_resume() {
+    for kind in ["requests", "tools", "context"] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("a.txt"), "saved result").unwrap();
+        let mut config = Config::new(workspace.clone(), root.path().join("data"));
+        match kind {
+            "requests" => config.max_model_attempts = 1,
+            "tools" => config.max_tool_calls = 1,
+            _ => config.context_tokens = 4096,
+        }
+        let calls = [
+            ToolCall {
+                id: "a".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"a.txt"}"#.into(),
+            },
+            ToolCall {
+                id: "b".into(),
+                name: "list_files".into(),
+                arguments: "{}".into(),
+            },
+        ];
+        let mut frames = calls
+            .iter()
+            .map(|c| ScriptFrame::ToolCall(serde_json::to_string(c).unwrap()))
+            .collect::<Vec<_>>();
+        frames.push(ScriptFrame::Complete);
+        let mut engine = Engine::open(
+            config.clone(),
+            ScriptedProvider::new(vec![ScriptStep {
+                expected_prompt: "inspect".into(),
+                frames,
+            }]),
+        )
+        .await
+        .unwrap();
+        let session = engine.create_session().await.unwrap();
+        let mut turn = engine.submit(session, "inspect".into()).await.unwrap();
+        let outcome = turn.outcome().await.unwrap();
+        assert_eq!(outcome.state, TurnState::SuspendedLimit);
+        assert_eq!(
+            outcome.reason,
+            match kind {
+                "requests" => StopReason::RequestLimit,
+                "tools" => StopReason::ToolLimit,
+                _ => StopReason::ContextLimit,
+            }
+        );
+        let old = engine.protocol_history(session).await.unwrap();
+        ScriptedProvider::new(vec![])
+            .validate_request(&old)
+            .unwrap();
+        assert_eq!(
+            engine.usage(session).await.unwrap().len(),
+            if kind == "context" { 0 } else { 1 }
+        );
+        engine.shutdown().await.unwrap();
+        std::fs::write(workspace.join("a.txt"), "new bytes").unwrap();
+        config.max_model_attempts = 30;
+        config.max_tool_calls = 60;
+        config.context_tokens = 128000;
+        let mut reopened = Engine::open(
+            config,
+            ScriptedProvider::new(vec![ScriptStep {
+                expected_prompt: "inspect".into(),
+                frames: vec![
+                    ScriptFrame::ExpectHistory(old.messages),
+                    ScriptFrame::Text("resumed".into()),
+                    ScriptFrame::Complete,
+                ],
+            }]),
+        )
+        .await
+        .unwrap();
+        let mut resumed = reopened.resume(session, turn.id).await.unwrap();
+        assert_eq!(resumed.outcome().await.unwrap().state, TurnState::Completed);
+        assert_eq!(
+            reopened.usage(session).await.unwrap().len(),
+            if kind == "context" { 1 } else { 2 }
+        );
+        reopened.shutdown().await.unwrap();
+    }
+}

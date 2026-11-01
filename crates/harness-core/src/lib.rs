@@ -1,16 +1,21 @@
 mod config;
+mod context;
 mod domain;
 mod engine;
+mod journal;
 mod provider;
 mod records;
 mod store;
+mod turn_loop;
+mod workspace;
+mod workspace_lock;
 
-pub use config::Config;
+pub use config::{Config, Policy};
 pub use domain::*;
 pub use engine::{Engine, TurnHandle};
-pub use provider::{
-    Epoch, ProtocolMessage, ProviderRequest, ScriptFrame, ScriptStep, ScriptedProvider,
-};
+pub use journal::UsageRecord;
+pub use provider::*;
+pub use workspace::Instruction;
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum Error {
@@ -32,6 +37,8 @@ pub enum Error {
     Shutdown,
     #[error("engine worker stopped unexpectedly")]
     Worker,
+    #[error("scoped inspection failed: {0}")]
+    Scope(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

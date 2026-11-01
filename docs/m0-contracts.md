@@ -1,5 +1,9 @@
 # M0 contracts
 
+Historical M0 baseline. M1a supersedes the no-tools/provider/recovery statements
+below; see [current M1a contracts](openrouter.md). Existing M0 sessions are
+preserved by the v2 migration.
+
 M0 is a credential-free scripted turn, not a coding-agent release. No tool,
 command, network provider, authentication, approval, or recovery action runs.
 The two crates are `harness-core` (ownership and storage) and `harness-cli`

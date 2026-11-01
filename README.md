@@ -1,33 +1,46 @@
 # z
 
-A Rust coding-agent harness inspired by fx, with an engine that owns turns and local sessions. Tools and approvals arrive in later milestones.
+A Rust coding-agent harness with engine-owned turns, scoped inspection and local
+SQLite sessions. The first release targets Windows and requires both OpenRouter
+and direct ChatGPT plan access.
 
-**Status: M0 scaffold. The CLI persists deterministic scripted turns in SQLite. No tools or live providers execute yet.**
+**Status: M1a read-only implementation, offline verified. Live OpenRouter
+qualification remains open in [M6 #9](https://github.com/zeyadomran/z/issues/9).
+Direct ChatGPT authentication, edits and command execution are later slices.**
 
-With the pinned Rust toolchain and Windows MSVC prerequisites installed:
+Credential-free smoke:
 
 ```powershell
-cargo run -p harness-cli -- ask --workspace . 'hello'
+cargo run -p harness-cli -- ask --workspace . --provider scripted 'hello'
 ```
 
-Storage defaults to `%LOCALAPPDATA%/z-harness`, outside the repository. For an
-owned disposable fixture, pass `--data-dir <absolute-local-directory>`. Keep
-storage private and outside cloud-synchronized/network folders. The command
-prints session/turn IDs, a completed response, and unavailable usage. Use
-`--session <id>` to append to a completed session in the same workspace.
+OpenRouter inspection with explicit non-secret configuration:
 
-The first release targets Windows with two required providers: OpenRouter and direct ChatGPT plan access through the supported Sign in with ChatGPT flow. Account/app eligibility must be validated before a complete release. Linux and macOS are later qualification targets.
+```powershell
+cargo run -p harness-cli -- ask --workspace . --provider openrouter `
+  --config ./openrouter.json 'Explain this project using its source files.'
+```
+
+Read [OpenRouter configuration, limits and failure guidance](docs/openrouter.md)
+for the JSON format, secure credential reference, model/upstream validation,
+privacy options and manual qualification constraints. No credential is accepted
+as a CLI argument. Scripted CI never calls a paid model.
+
+Storage defaults to `%LOCALAPPDATA%/z-harness`, outside the workspace. Keep it
+private, local and outside synchronized folders. `--data-dir` selects another
+absolute local directory; it cannot bypass the workspace lock or unresolved
+turn. `--session <id>` continues a completed conversation; `--resume-turn <id>`
+explicitly resumes suspended/interrupted read-only work without resetting budgets.
 
 - [Implementation plan](RUST_HARNESS_PLAN.md)
-- [Independent reviews and reconciliation](reviews/REVIEW_RECONCILIATION.md)
-- [Contributing and setup](CONTRIBUTING.md)
-- [M0 lifecycle and schema contracts](docs/m0-contracts.md)
-- [Testing and qualification limits](docs/testing.md)
-- [Dependency and toolchain baseline](docs/dependencies.md)
+- [Independent historical reviews](reviews/REVIEW_RECONCILIATION.md)
+- [Contributing/setup](CONTRIBUTING.md)
+- [Historical M0 contracts](docs/m0-contracts.md)
+- [Tests and actual qualification limits](docs/testing.md)
+- [Dependencies/toolchain](docs/dependencies.md)
 - [Repository maintenance](.github/MAINTENANCE.md)
 - [Security reporting](SECURITY.md)
 
-The two historical independent reviews evaluated the frozen v1 plan. Their
-reports do not establish approval of this implementation. CI checks repository
-maintenance and deterministic Windows M0 behavior; it does not qualify live
-provider access, tools, crash recovery, or a complete coding-agent release.
+Neither historical plan reviews nor deterministic CI establish live provider
+eligibility or a complete release. Both providers must pass the coding workflow
+in M6. Linux and macOS remain later runtime qualification targets.

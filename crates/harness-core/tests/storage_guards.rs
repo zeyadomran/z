@@ -33,7 +33,7 @@ async fn schema_mismatch_never_rewrites_existing_data() {
         connection
             .pragma_update(None, "application_id", 0x5a484152_i64)
             .unwrap();
-        connection.pragma_update(None, "user_version", 1).unwrap();
+        connection.pragma_update(None, "user_version", 2).unwrap();
         connection.close().unwrap();
         let mut reopened = Engine::open(config, ScriptedProvider::new(vec![]))
             .await
