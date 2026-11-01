@@ -4,7 +4,7 @@
 
 Use PRs for all changes after bootstrap, including administrators. Squash-only merging, automatic branch deletion, auto-merge, and branch updates are enabled. Main requires up-to-date checks, resolved conversations, and stale-review dismissal. Force pushes and deletion are blocked. Zero approving reviews are required for this solo-maintainer repository.
 
-Required contexts: `Workflow validation`, `Git hooks (ubuntu-latest)`, `Git hooks (windows-latest)`, `Dependency review`, `Analyze (actions)`, and the separate `CodeQL` findings check. Re-read actual protection and current-head checks before each authorized merge.
+Required contexts: `Workflow validation`, `Git hooks (ubuntu-latest)`, `Git hooks (windows-latest)`, `Dependency review`, `Analyze (actions)`, the separate `CodeQL` findings check, and `Rust (Windows)`. Re-read actual protection and current-head checks before each authorized merge.
 
 ## Checks and security
 
@@ -22,7 +22,7 @@ resolved dependency graph.
 
 M0 adds the pinned Rust toolchain and the `Rust (Windows)` CI context for
 formatting, Clippy, the public-engine functional suite, release build and a
-credential-free CLI smoke. Register this required context after its first
-successful run; this implementation does not modify remote branch protection.
+credential-free CLI smoke. This context was added to branch protection after
+its first successful run on 2026-11-01, preserving all six previous checks.
 Preserve all existing required contexts and the hook suite. Actions CodeQL
 remains unchanged; Rust source security qualification is not claimed.
