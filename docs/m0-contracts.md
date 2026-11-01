@@ -113,13 +113,15 @@ authorize tools. Account, credits, quota, transport and protocol failures need
 distinct adapter outcomes; only recognized transient failures may retry. No
 automatic account, model, provider or billing-route switch is allowed.
 
-As checked on 2026-11-01, OpenAI documents plan usage for open-source/local apps
-with their own registration and stable opaque host ID. Paid/remote products use
-a separate interest route. This repository has no declared open-source license;
-local development fits the documented local-app category, but distribution
-eligibility and intended account access are still unproven. M1b must perform
-the app's own sign-in, direct inference and custom-tool continuation; no existing
-app registration or API credits may stand in. No credentials were accessed.
+As checked on 2026-11-01, OpenAI documents plan usage for open-source partners
+and selected private clients with their own registration and stable opaque host
+ID. Paid/remote products use a separate interest route. The owner selected the
+[MIT license](../LICENSE); running locally or including a license alone does not
+establish eligibility. Distribution eligibility and intended account access are
+still unproven. Follow the [subscription contract](chatgpt-subscription/README.md).
+M1b must perform the app's own sign-in, direct inference and harness-owned wire
+`function` tool continuation; wire `custom_tool_call` support is not required.
+No existing app registration or API credits may stand in. No credentials were accessed.
 
 Sources: [overview](https://developers.openai.com/siwc/token-sharing-open-source),
 [registration](https://developers.openai.com/siwc/token-sharing-open-source/sign-in),

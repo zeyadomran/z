@@ -25,8 +25,9 @@ no shell/global PATH changes or unrelated toolchain changes were needed.
 Cargo metadata identifies permissive licenses for the selected Windows graph:
 MIT, Apache-2.0 alternatives, Zlib (foldhash) and Unicode-3.0 (unicode-ident).
 SQLite is public domain. Preserve required upstream notices when packaging.
-The repository does not yet declare its own distribution license; this task
-does not select one on the maintainer's behalf.
+The owner selected the [MIT license](../LICENSE) for this repository on
+2026-11-01. Licensing is distinct from ChatGPT distribution/account eligibility,
+which remains unproven under the [subscription contract](chatgpt-subscription/README.md).
 
 ## SQLite security review boundary
 
