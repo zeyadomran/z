@@ -170,8 +170,11 @@ requires explicit consent. Otherwise acquire the account refresh lock, reload th
 generation, and perform at most one refresh (or reuse a newer validated generation
 another process already saved). A successful refresh permits one retry of the
 rejected provider request, counted in the existing attempt budget. A second 401
-suspends the route for user reauthorization/diagnosis without another automatic
-refresh. Terminal refresh errors clear unusable credentials and require fresh
+suspends the route for diagnosis with the preserved request ID, without another
+automatic refresh. In particular, repeated `subscription_sharing_invalid_user`
+after successful refresh must not prompt sign-in: for that error, ask for sign-in
+only after confirmed revocation or a terminal refresh error. Terminal refresh
+errors clear unusable credentials and require fresh
 OAuth with the retained registration. Transient or uncertain refresh outcomes
 follow [the refresh policy](auth.md#rotation-persistence-and-logout); they do not
 authorize inference retries. Never replay tools or replace a stored completed
