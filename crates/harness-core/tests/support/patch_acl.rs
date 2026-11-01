@@ -8,6 +8,9 @@ pub fn acl(path: &std::path::Path, customize: bool) -> String {
     let script = format!("$ErrorActionPreference='Stop'; {script}");
     let result = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        // Cargo can inherit PowerShell 7 module paths on CI. Let Windows
+        // PowerShell rebuild its own paths instead of loading Core modules.
+        .env_remove("PSModulePath")
         .env("OWNED_PATCH_FILE", path)
         .output()
         .unwrap();
