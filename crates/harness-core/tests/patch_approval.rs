@@ -85,6 +85,9 @@ async fn denial_staleness_and_restart_never_reuse_approval_or_replay_completed_c
                     if branch == "stale" {
                         std::fs::write(w.join("new.txt"), "external create").unwrap();
                     }
+                    let database =
+                        rusqlite::Connection::open(config.data_dir.join("harness.sqlite")).unwrap();
+                    database.execute_batch("CREATE TRIGGER owned_skip_failure BEFORE UPDATE ON tool_calls WHEN NEW.provider_id='later' AND NEW.state='resolved' BEGIN SELECT RAISE(ABORT,'owned skip boundary'); END;").unwrap();
                     let mut resumed = engine
                         .decide_patch(
                             &preview.approval_id,
@@ -96,6 +99,23 @@ async fn denial_staleness_and_restart_never_reuse_approval_or_replay_completed_c
                         )
                         .await
                         .unwrap();
+                    assert!(
+                        matches!(resumed.outcome().await, Err(Error::Persistence(message)) if message.contains("owned skip boundary"))
+                    );
+                    assert!(
+                        matches!(engine.shutdown().await, Err(Error::Persistence(message)) if message.contains("owned skip boundary"))
+                    );
+                    database
+                        .execute_batch("DROP TRIGGER owned_skip_failure")
+                        .unwrap();
+                    database.close().unwrap();
+                    engine = Engine::open(
+                        config.clone(),
+                        ScriptedProvider::new(vec![ScriptStep::reply("edit", "done")]),
+                    )
+                    .await
+                    .unwrap();
+                    let mut resumed = engine.resume(session, turn.id).await.unwrap();
                     assert_eq!(resumed.outcome().await.unwrap().state, TurnState::Completed);
                 }
             }
@@ -113,6 +133,13 @@ async fn denial_staleness_and_restart_never_reuse_approval_or_replay_completed_c
         let results = results(&history);
         if branch != "malformed" {
             assert_eq!(results[0]["data"]["text"], "original read");
+        }
+        if matches!(branch, "deny" | "stale") {
+            assert_eq!(
+                results[1]["status"],
+                if branch == "deny" { "denied" } else { "stale" }
+            );
+            assert_eq!(results[2]["status"], "skipped");
         }
         assert_eq!(history.epoch.tool_schema, schema);
         engine.shutdown().await.unwrap();

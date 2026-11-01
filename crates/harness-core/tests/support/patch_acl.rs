@@ -5,11 +5,18 @@ pub fn acl(path: &std::path::Path, customize: bool) -> String {
     } else {
         "(Get-Acl -LiteralPath $env:OWNED_PATCH_FILE).Sddl"
     };
+    let script = format!("$ErrorActionPreference='Stop'; {script}");
     let result = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .env("OWNED_PATCH_FILE", path)
         .output()
         .unwrap();
-    assert!(result.status.success(), "owned ACL qualification failed");
+    assert!(
+        result.status.success(),
+        "owned ACL qualification failed (customize={customize}, status={}): {}\n{}",
+        result.status,
+        String::from_utf8_lossy(&result.stderr),
+        String::from_utf8_lossy(&result.stdout),
+    );
     String::from_utf8(result.stdout).unwrap().trim().to_string()
 }

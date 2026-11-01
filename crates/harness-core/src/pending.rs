@@ -9,13 +9,14 @@ use rusqlite::OptionalExtension;
 pub(crate) struct SavedCall {
     pub call: ToolCall,
     pub resolved: bool,
+    pub result: Option<String>,
 }
 pub(crate) async fn batch(store: &Store, turn: TurnId) -> Result<Option<(i64, Vec<SavedCall>)>> {
     store.call(move |c| {
         let batch:Option<i64>=c.query_row("SELECT batch_id FROM tool_calls WHERE turn_id=?1 AND batch_id>COALESCE((SELECT closed_message_id FROM checkpoints WHERE turn_id=?1),0) ORDER BY batch_id LIMIT 1",[turn.0],|r|r.get(0)).optional()?;
         let Some(batch)=batch else { return Ok(None); };
-        let mut q=c.prepare("SELECT provider_id,name,arguments,state FROM tool_calls WHERE batch_id=?1 ORDER BY ordinal")?;
-        let calls=q.query_map([batch],|r|Ok(SavedCall {call:ToolCall{id:r.get(0)?,name:r.get(1)?,arguments:r.get(2)?},resolved:r.get::<_,String>(3)?=="resolved"}))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        let mut q=c.prepare("SELECT provider_id,name,arguments,state,result FROM tool_calls WHERE batch_id=?1 ORDER BY ordinal")?;
+        let calls=q.query_map([batch],|r|Ok(SavedCall {call:ToolCall{id:r.get(0)?,name:r.get(1)?,arguments:r.get(2)?},resolved:r.get::<_,String>(3)?=="resolved",result:r.get(4)?}))?.collect::<std::result::Result<Vec<_>,_>>()?;
         Ok(Some((batch,calls)))
     }).await
 }
@@ -44,6 +45,19 @@ impl TurnRun {
         let mut stop = None;
         for saved in calls {
             if saved.resolved {
+                // A committed refusal to proceed still stops later calls after
+                // interruption. Only engine-owned patch statuses carry this
+                // decision; read content must not be interpreted as policy.
+                if saved.call.name == "apply_patch" {
+                    let result: serde_json::Value =
+                        serde_json::from_str(saved.result.as_deref().ok_or(Error::Worker)?)?;
+                    skip = match result["status"].as_str() {
+                        Some("denied") => Some("denial skips unstarted calls"),
+                        Some("stale") => Some("stale approval skips unstarted calls"),
+                        Some("rejected") => Some("invalid patch skips unstarted calls"),
+                        _ => skip,
+                    };
+                }
                 continue;
             }
             let call = saved.call;

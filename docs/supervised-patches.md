@@ -63,6 +63,8 @@ random identity; durable approval audit records cannot authorize a restart.
 The CLI escapes controls and all non-ASCII preview characters, without truncating
 security-relevant fields. Stale bytes/metadata invalidate the decision and require
 a fresh model proposal. Denial/staleness skips subsequent unstarted calls.
+The committed denial/stale result preserves that decision across interruption,
+including failure to persist a later skipped result.
 
 Complete batches are schema-validated before any effect. One malformed call
 rejects all unstarted calls in that batch, with complete ordered error results.
