@@ -124,4 +124,12 @@ async fn local_abandon_releases_saved_work_then_cli_continues_once() {
         .collect();
     assert_eq!(records.first().unwrap()["kind"], "accepted");
     assert_eq!(records.last().unwrap()["outcome"]["state"], "completed");
+    let ignored_instructions = run(&[
+        "--session",
+        saved,
+        "--instructions",
+        "missing-instructions.txt",
+    ]);
+    assert_eq!(ignored_instructions.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&ignored_instructions.stderr).contains("cannot be used with"));
 }

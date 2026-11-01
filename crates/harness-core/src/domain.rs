@@ -22,8 +22,12 @@ impl std::fmt::Display for UnresolvedWork {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "unresolved workspace work: use original --data-dir {:?}; resume with --session {} --resume-turn {}, or use harness abandon --session {} --turn {} with the same workspace and data directory",
-            self.data_dir, self.session_id.0, self.turn_id.0, self.session_id.0, self.turn_id.0
+            "unresolved workspace work: use original --data-dir \"{}\"; resume with --session {} --resume-turn {}, or use harness abandon --session {} --turn {} with the same workspace and data directory",
+            self.data_dir.display(),
+            self.session_id.0,
+            self.turn_id.0,
+            self.session_id.0,
+            self.turn_id.0
         )
     }
 }

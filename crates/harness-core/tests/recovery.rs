@@ -96,6 +96,17 @@ async fn process_lock_crosses_data_dirs_and_orphan_requires_explicit_resume() {
         "{message}"
     );
     assert!(message.contains("harness abandon"), "{message}");
+    let printed_path = message
+        .split("--data-dir \"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    assert_eq!(
+        std::fs::canonicalize(printed_path).unwrap(),
+        std::fs::canonicalize(root.path().join("data")).unwrap()
+    );
     let Error::UnresolvedWork(work) = error else {
         panic!("expected actionable recovery")
     };
@@ -114,6 +125,18 @@ async fn process_lock_crosses_data_dirs_and_orphan_requires_explicit_resume() {
         .err()
         .unwrap();
     assert!(missing_error.to_string().contains("original --data-dir"));
+    let missing_message = missing_error.to_string();
+    let printed_path = missing_message
+        .split("--data-dir \"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    assert_eq!(
+        std::fs::canonicalize(printed_path).unwrap(),
+        std::fs::canonicalize(root.path().join("data")).unwrap()
+    );
     assert!(
         matches!(missing_error, Error::RecoveryStoreUnavailable { data_dir } if data_dir.ends_with("data"))
     );

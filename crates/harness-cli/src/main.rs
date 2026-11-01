@@ -58,7 +58,7 @@ struct AskArgs {
     resume_turn: Option<i64>,
     #[arg(long,default_value="inspect",value_parser=["inspect","supervised"])]
     policy: String,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "session")]
     instructions: Option<PathBuf>,
     #[arg(long, default_value_t = 30)]
     max_requests: usize,

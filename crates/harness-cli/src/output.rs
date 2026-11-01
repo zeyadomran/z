@@ -130,6 +130,10 @@ impl Transcript {
             }
             self.current.clear();
             self.attempt = progress.attempt;
+            if self.attempt > 0 {
+                self.text
+                    .push_str(&format!("[request {} started]\n", self.attempt));
+            }
         }
         if progress.discarded_attempts > self.discarded {
             self.text
@@ -211,6 +215,11 @@ mod tests {
         let mut transcript = Transcript::default();
         transcript.observe(&harness_core::Progress {
             attempt: 1,
+            ..Default::default()
+        });
+        assert_eq!(transcript.text, "[request 1 started]\n");
+        transcript.observe(&harness_core::Progress {
+            attempt: 1,
             text: "Inspecting.".into(),
             ..Default::default()
         });
@@ -250,7 +259,7 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                "initial\nInspecting.\n{}\n\n[request attempt discarded; prior partial output is incomplete]\nAnswer complete.\nterminal\n",
+                "initial\n[request 1 started]\nInspecting.\n[request 2 started]\n{}\n[request 3 started]\n\n[request attempt discarded; prior partial output is incomplete]\nAnswer complete.\nterminal\n",
                 "a".repeat(63)
             )
         );

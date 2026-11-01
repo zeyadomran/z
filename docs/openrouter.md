@@ -135,7 +135,9 @@ IDs and original data directory with recovery guidance. A currently owned
 workspace still reports busy; a missing recovery store identifies its original
 data directory and must be restored before recovery.
 
-Normal stdout streams escaped text. JSON mode (`--json`) emits version 1 NDJSON
+Normal stdout shows a numbered request-start notice even when reasoning/tool
+rounds contain no visible text, then streams escaped text. JSON mode (`--json`)
+emits version 1 NDJSON
 `accepted`, coalesced `progress` snapshots, and a durable `terminal` record with
 per-attempt usage. It is output-only. Terminal/bidi controls are escaped in human
 output; model reasoning is preserved for continuation, not displayed. A blocked
@@ -205,6 +207,8 @@ per epoch while it remains in provider context. Discovery is committed atomicall
 with its tool result; failed persistence or a refused turn does not suppress a
 later discovery. Only newly included instruction content consumes output budget.
 `--instructions` explicitly loads user preferences.
+It is accepted only when creating a new session. Combining it with `--session`
+or `--resume-turn` is rejected because an existing epoch's prefix is frozen.
 
 Store data outside the workspace in a **private local directory**, normally
 `%LOCALAPPDATA%/z-harness`. Do not choose shared, network or cloud-synchronized
