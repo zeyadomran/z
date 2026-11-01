@@ -14,6 +14,10 @@ thiserror.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 httpdate.workspace = true
+base64.workspace = true
+uuid.workspace = true
+jsonwebtoken.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -29,4 +33,4 @@ test = false
 bench = false
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Security", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }
+windows-sys = { workspace = true, features = ["Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }

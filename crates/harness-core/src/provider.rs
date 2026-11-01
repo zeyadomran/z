@@ -5,6 +5,7 @@ use std::{future::Future, pin::Pin};
 use tokio::sync::watch;
 mod scripted;
 pub use scripted::{ScriptFrame, ScriptStep, ScriptedProvider};
+pub mod chatgpt;
 pub mod openrouter;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +77,12 @@ pub struct Progress {
     pub model: Option<String>,
     pub upstream: Option<String>,
     pub bytes: usize,
+    /// Sanitized provider evidence only, never response text or credentials.
+    #[serde(default)]
+    pub diagnostic: Option<Value>,
+    /// Local model admission configuration; never an upstream output cap.
+    #[serde(default)]
+    pub context_budget: Option<Value>,
 }
 #[derive(Debug, Clone)]
 pub struct ProviderResponse {

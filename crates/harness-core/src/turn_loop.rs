@@ -164,6 +164,7 @@ impl TurnRun {
                     StopReason::Throttled
                         | StopReason::Unavailable
                         | StopReason::RetryableTransport
+                        | StopReason::AuthenticationRefreshed
                 ) && retries < 2
                 {
                     retries += 1;
@@ -272,6 +273,11 @@ impl TurnRun {
             StopReason::Final => TurnState::Completed,
             StopReason::Cancelled => TurnState::Cancelled,
             StopReason::Refused => TurnState::Refused,
+            StopReason::ConsentRequired
+            | StopReason::ReauthorizationRequired
+            | StopReason::SubscriptionLimit
+            | StopReason::AccessBlocked
+            | StopReason::AccountDiagnosis => TurnState::SuspendedRecovery,
             StopReason::Deadline
             | StopReason::OutputLimit
             | StopReason::ContextLimit

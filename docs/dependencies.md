@@ -78,3 +78,24 @@ Rust versions below the pinned toolchain. Cargo.lock records the complete graph;
 CI dependency review remains required. Native TLS uses the supported host trust
 store. This targeted version/API/license check is not a complete security audit.
 No dependency update changes the outstanding live provider release gates.
+
+## M1b dependency additions
+
+Checked against current crate metadata/docs on 2026-11-01: `jsonwebtoken` 11.1.0
+(MIT, Rust 1.88 minimum) verifies RS256 ID tokens with a trusted JWKS using its
+RustCrypto implementation; the harness separately validates nonce, authorized
+party and issued-at constraints. `uuid` 1.29.0 supplies random installation and
+transaction identifiers; `base64` 0.22.1 encodes S256 challenges. Existing SHA-256,
+native TLS and tempfile dependencies are reused; tempfile now stages encrypted
+records as a runtime dependency. reqwest adds URL-encoded forms, Tokio adds
+network/I/O utilities, and windows-sys adds DPAPI, ACL and shell browser bindings.
+Unsafe auth calls are confined to `auth/windows.rs`. No Codex client, external
+registration, API-key adapter or hosted auth service is introduced.
+[JWT docs](https://docs.rs/jsonwebtoken/11.1.0/jsonwebtoken/),
+[UUID docs](https://docs.rs/uuid/1.29.0/uuid/).
+
+The lockfile records all crypto transitive versions. This is a targeted API,
+compatibility and license check, not a full crypto/dependency security audit.
+RSA signing occurs only in the external test issuer using a public fixture key;
+production performs signature verification. Existing dependency review and
+repository protection remain required.
