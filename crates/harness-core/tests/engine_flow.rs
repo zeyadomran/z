@@ -93,14 +93,45 @@ async fn completed_turn_and_history_survive_reopen() {
             .await
             .unwrap();
         let result = approved.outcome().await.unwrap();
-        assert_eq!(
-            result.state,
-            if call == "create-4" {
-                TurnState::AwaitingApproval
-            } else {
-                TurnState::Completed
+        let expected = if call == "create-4" {
+            TurnState::AwaitingApproval
+        } else {
+            TurnState::Completed
+        };
+        if result.state != expected {
+            // Keep native-runner failures actionable. All evidence belongs to
+            // this small owned fixture; no user workspace or credential data.
+            let database =
+                rusqlite::Connection::open(config.data_dir.join("harness.sqlite")).unwrap();
+            let mut query = database
+                .prepare("SELECT state,evidence,intent FROM patch_attempts ORDER BY id")
+                .unwrap();
+            let evidence = query
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            eprintln!("patch {call}: {result:?}; recorded attempts: {evidence:?}");
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                eprintln!(
+                    "fresh.txt actual ACL: {}; attributes: {}; bytes: {:?}",
+                    native_acl::acl(&workspace.join("fresh.txt"), false),
+                    std::fs::metadata(workspace.join("fresh.txt"))
+                        .unwrap()
+                        .file_attributes(),
+                    std::fs::read(workspace.join("fresh.txt")).unwrap()
+                );
             }
-        );
+        }
+        assert_eq!(result.state, expected);
     }
     assert_eq!(
         std::fs::read(workspace.join("fresh.txt")).unwrap(),
