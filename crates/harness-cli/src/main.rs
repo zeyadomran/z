@@ -5,13 +5,14 @@ use harness_core::{
 };
 use serde_json::json;
 use std::{path::PathBuf, process::ExitCode, time::Duration};
+mod approval;
 mod output;
 use output::{Output, Transcript, escaped, json_line};
 #[derive(Parser)]
 #[command(
     name = "harness",
     version,
-    about = "Bounded read-only coding harness; explicit OpenRouter or offline scripted provider"
+    about = "Bounded supervised coding harness; explicit OpenRouter or offline scripted provider"
 )]
 struct Args {
     #[command(subcommand)]
@@ -206,7 +207,17 @@ async fn run(args: Args) -> std::result::Result<u8, String> {
         let mut progress=turn.progress_receiver();let mut transcript=Transcript::default();
         let outcome=loop{
             tokio::select!{biased;
-                o=turn.outcome()=>break o.map_err(|e|e.to_string())?,
+                o=turn.outcome()=>{
+                    let outcome=o.map_err(|e|e.to_string())?;
+                    if matches!(outcome.state,TurnState::AwaitingApproval|TurnState::SuspendedRecovery) && approval::interactive(json_mode) {
+                        transcript.observe(&progress.borrow());
+                        if let Some(next)=approval::decide(&mut engine,session,&outcome,&mut failure).await? {
+                            turn=next; progress=turn.progress_receiver(); continue;
+                        }
+                        break engine.turn_outcome(session,outcome.turn_id).await.map_err(|e|e.to_string())?.ok_or("missing cancellation outcome")?;
+                    }
+                    break outcome;
+                },
                 _=tokio::signal::ctrl_c()=>{turn.cancel();break turn.outcome().await.map_err(|e|e.to_string())?;},
                 _=failure.changed()=>{turn.cancel();return Err("stdout observer lost; cancelling turn".into());},
                 changed=progress.changed()=>{
@@ -263,6 +274,8 @@ async fn run(args: Args) -> std::result::Result<u8, String> {
         TurnState::Completed => 0,
         TurnState::Cancelled => 130,
         TurnState::SuspendedLimit => 3,
+        TurnState::AwaitingApproval => 2,
+        TurnState::SuspendedRecovery | TurnState::Interrupted => 4,
         _ => 1,
     })
 }
@@ -272,6 +285,12 @@ fn local_data_dir(path: Option<PathBuf>) -> std::result::Result<PathBuf, String>
 }
 fn guidance(r: &StopReason) -> &'static str {
     match r {
+        StopReason::ApprovalRequired => {
+            "Approval required. Resume with --session and --resume-turn in a terminal using --policy supervised. JSON and non-TTY modes never read approval input."
+        }
+        StopReason::RecoveryRequired => {
+            "Patch outcome is uncertain. Resume to reconcile bytes and metadata, or explicitly abandon the turn; recorded artifacts are retained."
+        }
         StopReason::Authentication => {
             "Check the configured credential reference, permissions and account/key budget."
         }

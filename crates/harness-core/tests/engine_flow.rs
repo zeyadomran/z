@@ -1,5 +1,8 @@
 use harness_core::*;
 use serde_json::json;
+#[cfg(windows)]
+#[path = "support/patch_acl.rs"]
+mod native_acl;
 #[tokio::test]
 async fn completed_turn_and_history_survive_reopen() {
     let root = tempfile::tempdir().unwrap();
@@ -10,7 +13,17 @@ async fn completed_turn_and_history_survive_reopen() {
         b"\xef\xbb\xbfthe answer is 42\r\n",
     )
     .unwrap();
-    let config = Config::new(workspace.clone(), root.path().join("data"));
+    #[cfg(windows)]
+    let original_acl = native_acl::acl(&workspace.join("answer.txt"), true);
+    #[cfg(windows)]
+    let original_attributes = {
+        use std::os::windows::fs::MetadataExt;
+        std::fs::metadata(workspace.join("answer.txt"))
+            .unwrap()
+            .file_attributes()
+    };
+    let mut config = Config::new(workspace.clone(), root.path().join("data"));
+    config.policy = Policy::Supervised;
     let calls = vec![
         ToolCall {
             id: "read-1".into(),
@@ -21,6 +34,19 @@ async fn completed_turn_and_history_survive_reopen() {
             id: "search-2".into(),
             name: "search_text".into(),
             arguments: r#"{"query":"42"}"#.into(),
+        },
+        ToolCall {
+            id: "patch-3".into(),
+            name: "apply_patch".into(),
+            arguments: json!({"path":"answer.txt","expected_sha256":"6bc986c4a9e68fb55c134289596a694812fe3a304643960531ff863eb7536b1b","old_text":"42","new_text":"43"}).to_string(),
+        },
+        ToolCall {
+            id: "create-4".into(), name: "apply_patch".into(),
+            arguments: json!({"path":"fresh.txt","expected_sha256":"must_not_exist","old_text":"","new_text":""}).to_string(),
+        },
+        ToolCall {
+            id: "lf-edit-5".into(), name: "apply_patch".into(),
+            arguments: json!({"path":"fresh.txt","expected_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","old_text":"","new_text":"updated\n"}).to_string(),
         },
     ];
     let opaque =
@@ -42,10 +68,68 @@ async fn completed_turn_and_history_survive_reopen() {
     let session = engine.create_session().await.unwrap();
     let mut turn = engine.submit(session, "inspect".into()).await.unwrap();
     let outcome = turn.outcome().await.unwrap();
+    assert_eq!(outcome.state, TurnState::AwaitingApproval);
+    assert_eq!(outcome.reason, StopReason::ApprovalRequired);
+    assert_eq!(
+        std::fs::read(workspace.join("answer.txt")).unwrap(),
+        b"\xef\xbb\xbfthe answer is 42\r\n"
+    );
+    let preview = engine.preview_patch(session, turn.id).await.unwrap();
+    assert_eq!(preview.call_id, "patch-3");
+    assert_eq!(preview.arguments["old_text"], "42");
+    let mut approved = engine
+        .decide_patch(&preview.approval_id, ApprovalDecision::Approve)
+        .await
+        .unwrap();
+    assert_eq!(
+        approved.outcome().await.unwrap().state,
+        TurnState::AwaitingApproval
+    );
+    for call in ["create-4", "lf-edit-5"] {
+        let p = engine.preview_patch(session, turn.id).await.unwrap();
+        assert_eq!(p.call_id, call);
+        approved = engine
+            .decide_patch(&p.approval_id, ApprovalDecision::Approve)
+            .await
+            .unwrap();
+        let result = approved.outcome().await.unwrap();
+        assert_eq!(
+            result.state,
+            if call == "create-4" {
+                TurnState::AwaitingApproval
+            } else {
+                TurnState::Completed
+            }
+        );
+    }
+    assert_eq!(
+        std::fs::read(workspace.join("fresh.txt")).unwrap(),
+        b"updated\n"
+    );
+    let outcome = approved.outcome().await.unwrap();
+    assert_eq!(
+        std::fs::read(workspace.join("answer.txt")).unwrap(),
+        b"\xef\xbb\xbfthe answer is 43\r\n"
+    );
     assert_eq!(outcome.state, TurnState::Completed);
     assert_eq!(outcome.text.as_deref(), Some("The answer is 42."));
+    #[cfg(windows)]
+    assert_eq!(
+        native_acl::acl(&workspace.join("answer.txt"), false),
+        original_acl
+    );
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        assert_eq!(
+            std::fs::metadata(workspace.join("answer.txt"))
+                .unwrap()
+                .file_attributes(),
+            original_attributes
+        );
+    }
     let request = engine.protocol_history(session).await.unwrap();
-    assert_eq!(request.messages.len(), 5);
+    assert_eq!(request.messages.len(), 8);
     assert_eq!(
         request.messages[1],
         ProtocolMessage::AssistantData(AssistantMessage {
@@ -86,7 +170,10 @@ async fn completed_turn_and_history_survive_reopen() {
             }
         })
         .collect::<Vec<_>>();
-    assert_eq!(tool_order, vec!["read-1", "search-2"]);
+    assert_eq!(
+        tool_order,
+        vec!["read-1", "search-2", "patch-3", "create-4", "lf-edit-5"]
+    );
     assert!(
         events
             .iter()
@@ -98,7 +185,7 @@ async fn completed_turn_and_history_survive_reopen() {
             outcome: outcome.clone()
         }
     );
-    assert_eq!(turn.latest_sequence(), events.last().unwrap().sequence);
+    assert_eq!(approved.latest_sequence(), events.last().unwrap().sequence);
     assert_eq!(engine.usage(session).await.unwrap().len(), 2);
     let history = engine.history(session).await.unwrap();
     engine.shutdown().await.unwrap();

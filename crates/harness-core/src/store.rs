@@ -65,7 +65,7 @@ const APPLICATION_ID: i64 = 0x5a484152;
 fn identity(connection: &Connection) -> Result<i64> {
     let app: i64 = connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
     let version: i64 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if app == APPLICATION_ID && (version == 1 || version == 2) {
+    if app == APPLICATION_ID && (1..=3).contains(&version) {
         let contract: String = connection
             .query_row(
                 "SELECT contract FROM schema_meta WHERE singleton=1",
@@ -73,7 +73,13 @@ fn identity(connection: &Connection) -> Result<i64> {
                 |r| r.get(0),
             )
             .map_err(|_| Error::Schema)?;
-        if contract != if version == 1 { "z-m0-v1" } else { "z-m1a-v2" } {
+        if contract
+            != match version {
+                1 => "z-m0-v1",
+                2 => "z-m1a-v2",
+                _ => "z-m2-v3",
+            }
+        {
             return Err(Error::Schema);
         }
         return Ok(version);
@@ -113,11 +119,12 @@ fn open_database(path: PathBuf) -> Result<Connection> {
         transaction.commit()?;
     }
     migrate(&mut connection, &path)?;
+    migrate_patches(&mut connection, &path)?;
     Ok(connection)
 }
 
 fn migrate(connection: &mut Connection, path: &std::path::Path) -> Result<()> {
-    if identity(connection)? == 2 {
+    if identity(connection)? >= 2 {
         return Ok(());
     }
     let migration_lock = std::fs::OpenOptions::new()
@@ -127,7 +134,7 @@ fn migrate(connection: &mut Connection, path: &std::path::Path) -> Result<()> {
         .open(path.with_extension("migration-lock"))
         .map_err(|_| Error::Persistence("cannot open migration lock".into()))?;
     migration_lock.try_lock().map_err(|_| Error::Busy)?;
-    if identity(connection)? == 2 {
+    if identity(connection)? >= 2 {
         return Ok(());
     }
     let mut backup = path.with_extension("v1.backup.sqlite");
@@ -177,6 +184,40 @@ fn migrate(connection: &mut Connection, path: &std::path::Path) -> Result<()> {
             rusqlite::params![turn, epoch, serde_json::to_string(&message)?],
         )?;
     }
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_patches(connection: &mut Connection, path: &std::path::Path) -> Result<()> {
+    if identity(connection)? == 3 {
+        return Ok(());
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("migration-lock"))
+        .map_err(|_| Error::Persistence("cannot open migration lock".into()))?;
+    lock.try_lock().map_err(|_| Error::Busy)?;
+    if identity(connection)? == 3 {
+        return Ok(());
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| Error::Worker)?
+        .as_nanos();
+    let backup = path.with_extension(format!("v2.backup.{stamp}.sqlite"));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&backup)
+        .map_err(|_| Error::Persistence("cannot reserve migration backup".into()))?;
+    connection.backup("main", &backup, None::<fn(rusqlite::backup::Progress)>)?;
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if identity(&tx)? != 2 {
+        return Err(Error::Schema);
+    }
+    tx.execute_batch(include_str!("migration_v3.sql"))?;
     tx.commit()?;
     Ok(())
 }

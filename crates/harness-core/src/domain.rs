@@ -49,6 +49,8 @@ pub enum TurnState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
+    ApprovalRequired,
+    RecoveryRequired,
     Final,
     Cancelled,
     Deadline,
@@ -82,6 +84,16 @@ pub struct TurnOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EventKind {
+    ApprovalRequested {
+        turn_id: TurnId,
+        call_id: String,
+    },
+    ApprovalResolved {
+        turn_id: TurnId,
+        call_id: String,
+        approval_id: String,
+        approved: bool,
+    },
     TurnStarted {
         turn_id: TurnId,
     },

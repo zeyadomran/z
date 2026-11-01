@@ -15,6 +15,9 @@ async fn schema_mismatch_never_rewrites_existing_data() {
         engine.shutdown().await.unwrap();
         let path = config.data_dir.join("harness.sqlite");
         let connection = rusqlite::Connection::open(&path).unwrap();
+        let original_version: i64 = connection
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
         if foreign {
             connection.pragma_update(None, "application_id", 0).unwrap();
             connection.pragma_update(None, "user_version", 0).unwrap();
@@ -33,7 +36,9 @@ async fn schema_mismatch_never_rewrites_existing_data() {
         connection
             .pragma_update(None, "application_id", 0x5a484152_i64)
             .unwrap();
-        connection.pragma_update(None, "user_version", 2).unwrap();
+        connection
+            .pragma_update(None, "user_version", original_version)
+            .unwrap();
         connection.close().unwrap();
         let mut reopened = Engine::open(config, ScriptedProvider::new(vec![]))
             .await

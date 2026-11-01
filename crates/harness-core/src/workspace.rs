@@ -11,6 +11,7 @@ use std::{
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod native;
+pub(crate) mod patch;
 mod scan;
 
 pub(crate) fn hash(bytes: &[u8]) -> String {
@@ -27,7 +28,8 @@ fn io_error(_: std::io::Error) -> Error {
 }
 fn credential(name: &str) -> bool {
     let n = name.to_lowercase();
-    n == ".env"
+    n.starts_with(".harness-patch-")
+        || n == ".env"
         || n.starts_with(".env.")
         || n.starts_with("credentials.")
         || n.starts_with("secrets.")
@@ -85,7 +87,7 @@ pub(crate) struct Workspace {
     root: PathBuf,
     data: PathBuf,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Instruction {
     pub origin: String,
     pub sha256: String,
@@ -113,6 +115,9 @@ impl Workspace {
         }
     }
     pub fn resolve(&self, input: &str) -> Result<PathBuf> {
+        self.resolve_inner(input, false)
+    }
+    fn resolve_inner(&self, input: &str, create: bool) -> Result<PathBuf> {
         if link(&fs::symlink_metadata(&self.root).map_err(io_error)?) {
             return Err(denied());
         }
@@ -120,12 +125,13 @@ impl Workspace {
         if input.is_empty() {
             return Ok(out);
         }
-        for c in input.split(['/', '\\']) {
+        let components: Vec<_> = input.split(['/', '\\']).collect();
+        for (index, c) in components.iter().copied().enumerate() {
             let stem = c.split('.').next().unwrap_or("").to_uppercase();
             if c.is_empty()
                 || c == "."
                 || c == ".."
-                || c.contains(':')
+                || c.contains([':', '*', '?', '"', '<', '>', '|', '~'])
                 || c.ends_with(['.', ' '])
                 || c.chars().any(|x| x.is_control())
                 || matches!(
@@ -140,6 +146,10 @@ impl Workspace {
                 return Err(denied());
             }
             out.push(c);
+            if create && index + 1 == components.len() && !out.try_exists().map_err(io_error)? {
+                self.check_final(out.parent().ok_or_else(denied)?)?;
+                return Ok(out);
+            }
             if link(&fs::symlink_metadata(&out).map_err(io_error)?) {
                 return Err(denied());
             }
@@ -180,7 +190,7 @@ impl Workspace {
         }
         Ok(file)
     }
-    pub fn read(&self, input: &str) -> Result<(String, String, bool, String)> {
+    pub(crate) fn raw_snapshot(&self, input: &str) -> Result<Vec<u8>> {
         let path = self.resolve(input)?;
         let mut file = self.open_verified(&path)?;
         let before = file.metadata().map_err(io_error)?;
@@ -195,13 +205,24 @@ impl Workspace {
             .read_to_end(&mut bytes)
             .map_err(io_error)?;
         let after = file.metadata().map_err(io_error)?;
+        let current_path = self.resolve(input)?;
+        let mut current = self.open_verified(&current_path)?;
+        let mut verify = Vec::new();
+        (&mut current)
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut verify)
+            .map_err(io_error)?;
         if bytes.len() > 1024 * 1024
+            || bytes != verify
             || before.len() != after.len()
             || before.modified().ok() != after.modified().ok()
         {
-            return Err(io_error(std::io::ErrorKind::Other.into()));
+            return Err(Error::Scope("conflict: file changed during read".into()));
         }
-        self.resolve(input)?;
+        Ok(bytes)
+    }
+    pub fn read(&self, input: &str) -> Result<(String, String, bool, String)> {
+        let bytes = self.raw_snapshot(input)?;
         let digest = hash(&bytes);
         let text = std::str::from_utf8(&bytes)
             .map_err(|_| Error::Scope("unsupported encoding; UTF-8 required".into()))?;
@@ -209,15 +230,19 @@ impl Workspace {
             return Err(Error::Scope("binary file denied".into()));
         }
         Ok((
-            text.trim_start_matches('\u{feff}').replace("\r\n", "\n"),
+            text.strip_prefix('\u{feff}')
+                .unwrap_or(text)
+                .replace("\r\n", "\n"),
             digest,
             bytes.starts_with(&[0xef, 0xbb, 0xbf]),
             if text.contains("\r\n") {
-                if text.replace("\r\n", "").contains('\n') {
+                if text.replace("\r\n", "").contains(['\n', '\r']) {
                     "mixed"
                 } else {
                     "crlf"
                 }
+            } else if text.contains('\r') {
+                "mixed"
             } else {
                 "lf"
             }
@@ -285,6 +310,31 @@ impl Workspace {
         match self.tool(name, arguments, known) {
             Ok(v) => v,
             Err(e) => json!({"error":e.to_string()}),
+        }
+    }
+    pub(crate) fn validate_tool(name: &str, arguments: &str) -> Result<()> {
+        if arguments.len() > 256 * 1024 {
+            return Err(denied());
+        }
+        if name == "apply_patch" {
+            return patch::PatchArgs::parse(arguments).map(|_| ());
+        }
+        let args: Args = serde_json::from_str(arguments).map_err(|_| denied())?;
+        if !(1..=200).contains(&args.limit) || args.offset > 1_000_000 {
+            return Err(denied());
+        }
+        match name {
+            "read_file" if !args.path.is_empty() && args.query.is_none() => Ok(()),
+            "list_files" if args.query.is_none() => Ok(()),
+            "search_text"
+                if args
+                    .query
+                    .as_ref()
+                    .is_some_and(|q| !q.is_empty() && q.len() <= 1024) =>
+            {
+                Ok(())
+            }
+            _ => Err(denied()),
         }
     }
     fn tool(

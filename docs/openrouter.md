@@ -1,5 +1,9 @@
 # OpenRouter scoped inspection (M1a)
 
+M2 extends this adapter-independent engine with [supervised patches](supervised-patches.md).
+The read-only milestone history below remains relevant; patch approval/recovery
+now follows the M2 contract.
+
 M1a implements the offline-verified read-only loop for #3. Live qualification
 remains **outstanding in [M6 #9](https://github.com/zeyadomran/z/issues/9)**.
 Neither wire fixtures nor catalog access establish a working paid route.

@@ -30,6 +30,76 @@ impl Provider for UnavailableAccount {
 }
 
 #[tokio::test]
+async fn output_only_resume_returns_approval_required_without_consuming_stdin() {
+    let root = tempfile::tempdir().unwrap();
+    let w = root.path().join("workspace");
+    std::fs::create_dir(&w).unwrap();
+    let data = root.path().join("data");
+    let mut config = Config::new(w.clone(), data.clone());
+    config.policy = Policy::Supervised;
+    let call=ToolCall{id:"patch".into(),name:"apply_patch".into(),arguments:r#"{"path":"new.txt","expected_sha256":"must_not_exist","old_text":"","new_text":"new\n"}"#.into()};
+    let mut e = Engine::open(
+        config.clone(),
+        ScriptedProvider::new(vec![ScriptStep {
+            expected_prompt: "edit".into(),
+            frames: vec![
+                ScriptFrame::ToolCall(serde_json::to_string(&call).unwrap()),
+                ScriptFrame::Complete,
+            ],
+        }]),
+    )
+    .await
+    .unwrap();
+    let session = e.create_session().await.unwrap();
+    let mut turn = e.submit(session, "edit".into()).await.unwrap();
+    assert_eq!(
+        turn.outcome().await.unwrap().state,
+        TurnState::AwaitingApproval
+    );
+    e.shutdown().await.unwrap();
+    for json in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_harness"));
+        command
+            .args(["ask", "--workspace"])
+            .arg(&w)
+            .arg("--data-dir")
+            .arg(&data)
+            .args(["--policy", "supervised", "--session"])
+            .arg(session.0.to_string())
+            .arg("--resume-turn")
+            .arg(turn.id.0.to_string());
+        if json {
+            command.arg("--json");
+        }
+        // Keep stdin open without sending an answer. Non-TTY mode must exit.
+        let mut child = command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+            .await
+            .unwrap();
+        drop(input);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!w.join("new.txt").exists());
+        if json {
+            let text = String::from_utf8(output.stdout).unwrap();
+            let terminal: serde_json::Value =
+                serde_json::from_str(text.lines().last().unwrap()).unwrap();
+            assert_eq!(terminal["outcome"]["reason"], "approval_required");
+        }
+    }
+    let mut e = Engine::open(config, ScriptedProvider::new(vec![]))
+        .await
+        .unwrap();
+    assert_eq!(e.usage(session).await.unwrap().len(), 1);
+    e.abandon(session, turn.id).await.unwrap();
+    e.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn local_abandon_releases_saved_work_then_cli_continues_once() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");

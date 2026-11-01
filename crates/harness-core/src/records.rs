@@ -116,6 +116,10 @@ pub(crate) async fn finish(
         let changed=tx.execute("UPDATE turns SET state=?1,outcome=?2,active_ms=MAX(active_ms,?3) WHERE id=?4 AND session_id=?5 AND state='running'",params![state,serde_json::to_string(&outcome)?,active_ms,turn.0,session.0])?;
         if changed!=1 {return Err(Error::Persistence("turn transition conflict".into()));}
         tx.execute("UPDATE model_attempts SET state='incomplete',stop_reason=?1 WHERE turn_id=?2 AND state='running'",params![serde_json::to_string(&outcome.reason)?,turn.0])?;
+        if outcome.state == TurnState::AwaitingApproval {
+            let call_id:String=tx.query_row("SELECT provider_id FROM tool_calls WHERE turn_id=?1 AND state!='resolved' ORDER BY ordinal LIMIT 1",[turn.0],|r|r.get(0))?;
+            event(&tx,session,turn,EventKind::ApprovalRequested{turn_id:turn,call_id})?;
+        }
         let sequence=event(&tx,session,turn,EventKind::TurnStopped{outcome})?;
         tx.commit()?; Ok(sequence)
     }).await
