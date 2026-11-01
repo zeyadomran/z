@@ -13,6 +13,15 @@ chosen `slug`. Refresh when accounts change; cache with registration and retriev
 time. Do not infer context limits or tools from a display name or a different
 account's catalog.
 
+The documented catalog supplies no context limits or tool-capability fields.
+Harness policy: require host configuration per exact slug for input context
+capacity and response headroom, with recorded source/qualification provenance.
+Reject missing, zero, inconsistent, or invalid limits before sending. Budget
+instructions, schemas, history and the entire next result batch within that
+capacity; this is a local admission limit, not an upstream output-token cap.
+Model-specific function support must pass qualification. Do not use undocumented
+catalog fields or guessed defaults; any future metadata source needs verification.
+
 Inference is `POST https://api.openai.com/v1/responses`, headers
 `Authorization: Bearer <same-profile-access-token>` and
 `Content-Type: application/json`, with SSE response consumption. The documented
@@ -98,6 +107,8 @@ and namespace, rather than reconstructing a flattened tool name. Custom-tool
 items use `custom_tool_call` with string `input`; their matching result uses
 `custom_tool_call_output` and the same `call_id`. M1b can implement function tools
 only and explicitly reject unexpected executable custom-tool content.
+The plan's harness-owned tool acceptance is satisfied by this wire `function`
+round trip; wire `custom_tool_call` support is not an additional M1b requirement.
 [Responses item schemas](https://developers.openai.com/api/reference/resources/responses/methods/create).
 
 Preserve all required reasoning items, including opaque `encrypted_content`,
@@ -109,6 +120,17 @@ without `include` initially; missing required continuation is a qualification
 failure, not permission to drop it. Generic examples using `store: true`, scalar
 input, or `previous_response_id` do not override this route's restrictions.
 [Stateless reasoning](https://developers.openai.com/api/docs/guides/reasoning#preserve-reasoning-without-stored-responses).
+
+For streaming reasoning, retain the complete item from `response.output_item.done`,
+including its final `encrypted_content`; `.added` can contain an incomplete value.
+Never reconstruct opaque state from `.added` plus text deltas.
+[Completed reasoning items](https://developers.openai.com/api/reference/resources/responses/subresources/input_items/methods/list).
+Harness policy: collect done items by output index and ID. At `response.completed`,
+reconcile their identities, order and types with the terminal output, retaining
+the done item's opaque value. If the terminal output also supplies that value it
+must match. Missing done reasoning items, conflicting IDs/values, or inconsistent
+order fail the response before any tool executes. Item completion alone never
+authorizes execution without the successful response terminal event.
 
 Harness policy: assemble arbitrary SSE chunks without executing partial calls.
 Only `response.completed` authorizes complete-output inspection; refusal is not
@@ -124,6 +146,8 @@ recovery rules; local disconnect does not prove upstream cancellation or no usag
 Record sanitized HTTP status, structured `error.code`/`error.param`, request ID,
 and whether failure preceded SSE or arrived as `response.failed`. Admission may
 return `{"detail":"..."}` instead of `error`; diagnostic text is not a stable code.
+The official error list is not exhaustive. The fallback rows below are harness
+policy, not a claim that all future errors have known meanings.
 
 | Exact code / condition | Harness outcome and action |
 | --- | --- |
@@ -133,10 +157,25 @@ return `{"detail":"..."}` instead of `error`; diagnostic text is not a stable co
 | `subscription_sharing_user_unavailable` (503) | Same transient handling for user/workspace lookup |
 | `subscription_sharing_unsupported_capability` (400) | Diagnose `error.param`; correct feature/model/service-tier configuration; no identical retry |
 | `subscription_sharing_route_not_supported` (403) | Correct method/endpoint; repeated sign-in is not the fix |
-| `subscription_sharing_invalid_user` (401) | Diagnose subscriber/credential context; reauthenticate after confirmed revocation or terminal refresh error |
+| `subscription_sharing_invalid_user` (401) | Run the bounded 401 recovery policy below; never loop OAuth |
 | `chatpass_v2_scope_not_authorized`, `chatpass_v2_invalid_authorization_context` (403) | Check registration and grant configuration; no retry/billing switch |
-| Admission 401 / 403 without code | Diagnose identity/direct grant / policy or serving-region restriction respectively |
+| Other 401, with or without a structured code | Run the bounded 401 recovery policy below |
+| Admission 403 without code | Stop for grant/policy/region diagnosis; no automatic OAuth or retry |
 | Admission 503 without code | Route unavailable or not enabled; preserve credentials, bounded retry then surface blocker |
+| Verified context-overflow code, including `context_length_exceeded` | Return recoverable `context_limit`; no identical retry or partial tool execution |
+| Other unknown structured code/status | Preserve sanitized evidence; stop with an actionable provider error unless a verified transient classification permits bounded retry; never infer eligibility or erase tokens from an unknown code alone |
+
+Harness 401 recovery: check the saved direct-use scope first; missing permission
+requires explicit consent. Otherwise acquire the account refresh lock, reload the
+generation, and perform at most one refresh (or reuse a newer validated generation
+another process already saved). A successful refresh permits one retry of the
+rejected provider request, counted in the existing attempt budget. A second 401
+suspends the route for user reauthorization/diagnosis without another automatic
+refresh. Terminal refresh errors clear unusable credentials and require fresh
+OAuth with the retained registration. Transient or uncertain refresh outcomes
+follow [the refresh policy](auth.md#rotation-persistence-and-logout); they do not
+authorize inference retries. Never replay tools or replace a stored completed
+assistant response as part of authentication recovery.
 
 For unknown 429s do not invent subscription exhaustion; retain the error and apply
 bounded transient retry only when classified as throttling. Keep the plan's

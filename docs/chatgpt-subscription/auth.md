@@ -66,7 +66,7 @@ Authorization query fields:
 
 ```text
 client_id = dynamic_agent_client (new) OR selected issued ID (returning)
-agent_name_hint = z (new registration only; display metadata)
+agent_name_hint = <PRODUCT_NAME> (new registration only; display metadata)
 ext_agent_host_id = persisted host ID
 response_type = code
 redirect_uri = exact callback URI
@@ -77,6 +77,11 @@ nonce = fresh OIDC nonce
 code_challenge_method = S256
 code_challenge = derived PKCE challenge
 ```
+
+Harness policy: use one product-name constant across CLI/help, consent and usage
+labels, and all installations. `harness` is the plan's provisional name; the
+repository name `z` does not settle branding. Settle that constant before the
+first distributed registration rather than assigning per-installation names.
 
 Returning sign-in may send the selected registration's retained ID token as
 `id_token_hint` (even expired), and validated email as `login_hint`. Omit the ID
@@ -149,9 +154,16 @@ Harness policy: Windows OS-protected credential storage outside workspaces and
 session databases, with restrictive user ACLs; Unix `0600` examples do not prove
 Windows protection. Lock across refresh/logout, reload the current token generation
 under lock, and prevent an in-flight refresh from restoring logged-out credentials.
-If a rotated response is lost or cannot be persisted, stop this route and recover
-through reauthorization; never replay an uncertain old refresh token in a loop.
-Temporary network failures preserve credentials. Terminal refresh codes
+Distinguish refresh failures by whether the request could have reached the server.
+A proven pre-send failure preserves credentials and permits bounded retry under
+the same lock. Once transmission may have begun, a missing/invalid response or
+failed persistence leaves rotation uncertain: mark the generation unusable,
+suspend the route, and require fresh authorization with the retained issued ID.
+Do not replay that generation. If the HTTP client cannot prove pre-send failure,
+treat it as uncertain. This deliberately conservative harness policy can require
+sign-in after a network drop; it does not claim that the server revoked the token.
+An explicit transient error response preserves credentials and permits bounded
+backoff. Terminal refresh codes
 `invalid_grant`, `invalid_refresh_token`, `token_expired`, `refresh_token_expired`,
 `refresh_token_invalidated`, and `refresh_token_reused` require clearing unusable
 tokens and fresh OAuth with the saved ID; `invalid_client` needs configuration

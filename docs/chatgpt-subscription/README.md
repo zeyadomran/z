@@ -19,7 +19,16 @@ eligibility for a particular user, workspace, region, or model.
 [Quickstart](https://developers.openai.com/siwc/quickstart),
 [registration](https://developers.openai.com/siwc/token-sharing-open-source/sign-in).
 
-The OSS/local documentation directs paid or remotely hosted products to the
+The quickstart makes plan usage available to open-source partners and selected
+private clients; running locally alone does not establish eligibility. At this
+review, z has no license file and GitHub reports no license. Before M1b/M6
+distribution qualification, publish under an owner-approved open-source license
+or obtain OpenAI selection for a private client. The public docs do not define
+OpenAI's precise open-source criterion; a license is a prerequisite, not proof
+of acceptance. License selection remains an owner decision.
+[Eligibility](https://developers.openai.com/siwc/quickstart).
+
+The open-source integration documentation directs paid or remotely hosted products to the
 [interest form](https://openai.com/form/sign-in-with-chatgpt-interest/).
 A later paid or hosted distribution therefore needs a separate access decision.
 An open repository alone is not proof that an arbitrary distribution qualifies.
@@ -35,7 +44,7 @@ Plan usage grants no access to the user's ChatGPT conversations.
 
 | Gate | Required evidence in M1b/M6 | Status of this research |
 | --- | --- | --- |
-| Distribution | Confirm the shipped app remains eligible OSS/local software; obtain OpenAI access if paid/hosted | Documented route; distribution not qualified |
+| Distribution | Establish open-source licensing and route eligibility, or obtain private-client selection; obtain separate access if paid/hosted | No license selected; distribution not qualified |
 | Own registration | User completes this app's dynamic flow with an eligible account/workspace and grants direct plan usage | Not attempted; no issued registration obtained |
 | Local runtime | System browser, working `127.0.0.1` callback, trusted HTTPS, accurate clock, protected credential persistence | Rust/Windows behavior not exercised |
 | Account access | Selected account catalog, completed subscription response, harness-owned read-tool call and continuation | Not attempted; listing/sign-in alone will not pass |
@@ -59,10 +68,16 @@ CI and controlled protocol fixtures cannot establish live account qualification.
 
 Section 4.2 remains correct about the required route, endpoint, stateless HTTP,
 completion boundary, and unsupported output-token cap. It now links this contract.
-The one factual correction in section 4.3 is its blanket treatment of 401/403 as
+The factual correction in section 4.3 is its blanket treatment of 401/403 as
 account action: direct ChatGPT 403 can mean an unsupported route or a grant/policy
 configuration problem, for which repeated sign-in is inappropriate. The exact
 error mapping in [responses.md](responses.md) replaces that assumption.
+
+Section 4.2 also clarifies that its harness-owned tool acceptance uses the wire
+`function` type; it does not require the separate wire `custom_tool_call` type.
+Review follow-up makes distribution prerequisites, configured model limits,
+completed reasoning-item assembly, and bounded authentication recovery explicit.
+Product branding remains provisional and must be consistent before registration.
 
 The namespace requirement, dynamic bootstrap/issued-ID distinction, remote
 revocation, and full denylist below elaborate previously underspecified details;
