@@ -41,7 +41,22 @@ impl PatchArgs {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Metadata {
     pub attributes: u32,
+    #[serde(deserialize_with = "security_string")]
     pub security: String,
+}
+fn security_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    // Older intents stored unused WCHAR buffer capacity after the terminator.
+    // Normalize only that serialization padding, never ACEs or control flags.
+    let text = text.trim_end_matches('\0');
+    if text.contains('\0') {
+        return Err(serde::de::Error::custom(
+            "embedded NUL in security metadata",
+        ));
+    }
+    Ok(text.to_owned())
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Prepared {

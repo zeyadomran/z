@@ -7,7 +7,10 @@ mod native_acl;
 async fn completed_turn_and_history_survive_reopen() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
+    #[cfg(not(windows))]
     std::fs::create_dir(&workspace).unwrap();
+    #[cfg(windows)]
+    native_acl::legacy_parent(&workspace);
     std::fs::write(
         workspace.join("answer.txt"),
         b"\xef\xbb\xbfthe answer is 42\r\n",
@@ -77,6 +80,11 @@ async fn completed_turn_and_history_survive_reopen() {
     let preview = engine.preview_patch(session, turn.id).await.unwrap();
     assert_eq!(preview.call_id, "patch-3");
     assert_eq!(preview.arguments["old_text"], "42");
+    #[cfg(windows)]
+    assert_eq!(
+        preview.metadata["original"]["security"],
+        native_acl::raw_acl(&workspace.join("answer.txt"))
+    );
     let mut approved = engine
         .decide_patch(&preview.approval_id, ApprovalDecision::Approve)
         .await
@@ -88,6 +96,15 @@ async fn completed_turn_and_history_survive_reopen() {
     for call in ["create-4", "lf-edit-5"] {
         let p = engine.preview_patch(session, turn.id).await.unwrap();
         assert_eq!(p.call_id, call);
+        #[cfg(windows)]
+        let fresh_acl = if call == "lf-edit-5" {
+            let acl = native_acl::raw_acl(&workspace.join("fresh.txt"));
+            assert!(acl.contains("D:(A;;FA;;;SY)"), "legacy file: {acl}");
+            assert_eq!(p.metadata["original"]["security"], acl);
+            Some(acl)
+        } else {
+            None
+        };
         approved = engine
             .decide_patch(&p.approval_id, ApprovalDecision::Approve)
             .await
@@ -123,7 +140,7 @@ async fn completed_turn_and_history_survive_reopen() {
                 use std::os::windows::fs::MetadataExt;
                 eprintln!(
                     "fresh.txt actual ACL: {}; attributes: {}; bytes: {:?}",
-                    native_acl::acl(&workspace.join("fresh.txt"), false),
+                    native_acl::raw_acl(&workspace.join("fresh.txt")),
                     std::fs::metadata(workspace.join("fresh.txt"))
                         .unwrap()
                         .file_attributes(),
@@ -132,6 +149,10 @@ async fn completed_turn_and_history_survive_reopen() {
             }
         }
         assert_eq!(result.state, expected);
+        #[cfg(windows)]
+        if let Some(acl) = fresh_acl {
+            assert_eq!(native_acl::raw_acl(&workspace.join("fresh.txt")), acl);
+        }
     }
     assert_eq!(
         std::fs::read(workspace.join("fresh.txt")).unwrap(),

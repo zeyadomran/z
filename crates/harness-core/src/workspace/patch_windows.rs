@@ -74,20 +74,32 @@ pub(super) fn metadata(path: &Path, file: bool) -> Result<Metadata> {
     {
         return Err(error());
     }
-    // SAFETY: the API returned length UTF-16 units including the terminator.
-    let security = unsafe {
-        String::from_utf16_lossy(std::slice::from_raw_parts(
-            sddl,
-            length.saturating_sub(1) as usize,
-        ))
-    };
+    // The returned length is buffer capacity in WCHARs, not string length.
+    // Read only through its first terminator, within that documented bound.
+    let security = (|| {
+        if sddl.is_null() || length == 0 {
+            return Err(Error::Scope("missing native security string".into()));
+        }
+        let mut units = Vec::new();
+        for i in 0..length as usize {
+            // SAFETY: i stays inside the API's allocated WCHAR buffer. Stop at
+            // NUL so unused capacity is never read or serialized as metadata.
+            let unit = unsafe { *sddl.add(i) };
+            if unit == 0 {
+                return String::from_utf16(&units)
+                    .map_err(|_| Error::Scope("invalid native security string".into()));
+            }
+            units.push(unit);
+        }
+        Err(Error::Scope("unterminated native security string".into()))
+    })();
     // SAFETY: allocation belongs to LocalAlloc per the API contract.
     unsafe {
         LocalFree(sddl.cast());
     }
     Ok(Metadata {
         attributes,
-        security,
+        security: security?,
     })
 }
 pub(super) fn stage_attributes(path: &Path, metadata: &Metadata) -> Result<()> {
@@ -99,6 +111,30 @@ pub(super) fn stage_attributes(path: &Path, metadata: &Metadata) -> Result<()> {
     Ok(())
 }
 pub(super) fn secure_stage(path: &Path, metadata: &Metadata) -> Result<()> {
+    set_dacl(path, metadata)?;
+    // SetFileSecurityW clears informational auto-inheritance flags on the
+    // stage. Require identical owner/group, ACEs and protection before bytes
+    // are written. Final verification below never normalizes these flags.
+    fn staging_security(s: &str) -> String {
+        let Some((owner, dacl)) = s.split_once("D:") else {
+            return s.into();
+        };
+        let (flags, aces) = dacl.split_at(dacl.find('(').unwrap_or(dacl.len()));
+        format!(
+            "{owner}D:{}{aces}",
+            flags.replace("AI", "").replace("AR", "")
+        )
+    }
+    if staging_security(&self::metadata(path, true)?.security)
+        != staging_security(&metadata.security)
+    {
+        return Err(Error::Scope(
+            "staging security metadata did not match".into(),
+        ));
+    }
+    Ok(())
+}
+fn set_dacl(path: &Path, metadata: &Metadata) -> Result<()> {
     use windows_sys::Win32::Security::{
         Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
         GetSecurityDescriptorControl, PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
@@ -138,7 +174,7 @@ pub(super) fn secure_stage(path: &Path, metadata: &Metadata) -> Result<()> {
         };
         let path_wide = wide(path);
         // SAFETY: terminated path and valid descriptor. Set only the approved
-        // DACL, before writing any source bytes into the newly created stage.
+        // DACL; owner/group must already match and are never rewritten.
         if unsafe {
             SetFileSecurityW(
                 path_wide.as_ptr(),
@@ -148,26 +184,6 @@ pub(super) fn secure_stage(path: &Path, metadata: &Metadata) -> Result<()> {
         } == 0
         {
             return Err(error());
-        }
-        // SetFileSecurityW clears informational auto-inheritance flags on the
-        // stage. Require identical owner/group, ACEs and protection; native
-        // replacement must still restore the full original final descriptor.
-        fn staging_security(s: &str) -> String {
-            let Some((owner, dacl)) = s.split_once("D:") else {
-                return s.into();
-            };
-            let (flags, aces) = dacl.split_at(dacl.find('(').unwrap_or(dacl.len()));
-            format!(
-                "{owner}D:{}{aces}",
-                flags.replace("AI", "").replace("AR", "")
-            )
-        }
-        if staging_security(&self::metadata(path, true)?.security)
-            != staging_security(&metadata.security)
-        {
-            return Err(Error::Scope(
-                "staging security metadata did not match".into(),
-            ));
         }
         Ok(())
     })();
@@ -215,6 +231,22 @@ pub(super) fn replace(intent: &Intent, revalidate: impl Fn() -> Result<()>) -> R
             )));
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    if let Some(meta) = &intent.prepared.before_metadata
+        && self::metadata(&intent.prepared.target, true)? != *meta
+    {
+        // ReplaceFileW's DACL merge can convert a legacy unprotected DACL to
+        // AI and append inherited ACEs. The original and intended descriptor
+        // are already durable. Restore the approved DACL using the low-level
+        // setter (no parent-ACE merge), then require exact supported metadata.
+        // A failure or crash in this gap retains the intent/backup as unknown;
+        // restart only inspects evidence, and never retries this mutation.
+        set_dacl(&intent.prepared.target, meta)?;
+        if self::metadata(&intent.prepared.target, true)? != *meta {
+            return Err(Error::Scope(
+                "replacement metadata restoration did not match".into(),
+            ));
+        }
     }
     // ReplaceFileW has no supported write-through flag. Flush the resulting
     // file explicitly; failure retains intent and triggers reconciliation.

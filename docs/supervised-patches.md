@@ -85,6 +85,31 @@ records expected metadata before attempting replacement. Existing targets use
 without replace-existing and with write-through. Sharing/lock violations retry
 for at most 500 ms. Resulting files are explicitly flushed and verified.
 
+`ReplaceFileW` can convert a legacy unprotected DACL (no `AI` flag) to automatic
+inheritance and append inherited ACEs, even when the stage already has the exact
+original DACL. After replacement, any metadata mismatch requires reapplying the
+approved DACL with `SetFileSecurityW` and exact readback of owner/group, DACL flags
+and ACEs, and attributes. The setter writes only the DACL; owner/group must already
+match. It does not accept an expanded permission set as success. This low-level
+setter is intentional: the recommended `SetNamedSecurityInfoW` implements
+[automatic inheritance](https://learn.microsoft.com/en-us/windows/win32/secauthz/automatic-propagation-of-inheritable-aces),
+while [SetFileSecurityW](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-setfilesecurityw)
+does not propagate its directory changes to children. Exact readback remains the
+authority; a successful API return alone does not establish preservation.
+
+Replacement and DACL restoration are separate native effects. A crash or failed
+restoration can leave the new bytes with the merged ACL. Both original and intended
+metadata are durable before replacement; backup and intent remain available. Such
+an intermediate state suspends recovery, and restart never reapplies the DACL or
+replays the patch. There is no atomic ACL-restoration or hostile-writer guarantee.
+
+SDDL serialization reads to the first NUL within the returned buffer capacity.
+Microsoft defines the conversion API's
+[length as buffer size, not string length](https://learn.microsoft.com/en-us/windows/win32/api/sddl/nf-sddl-convertsecuritydescriptortostringsecuritydescriptorw).
+Older saved intents with trailing NUL padding are compared as logical strings on
+deserialization, without rewriting stored evidence. Embedded NULs are rejected;
+ACEs and control flags are never normalized for final reconciliation.
+
 Supported existing-file metadata is owner/group, DACL (including inheritance
 protection), and normal/hidden/system/archive/not-content-indexed attributes.
 Owner/group must match the newly inherited staging owner/group; unsupported
@@ -113,11 +138,18 @@ not qualified by transaction-abort fixtures.
 The canonical `engine_flow` now covers reads/search, approved CRLF+BOM edit with
 a protected non-default DACL and non-default attributes, must-not-exist LF create,
 LF edit, final response, shutdown, and reopened history with frozen opaque context.
+Its owned parent explicitly reproduces the hosted runner's legacy no-`AI` ACL;
+an independent native readback checks exact SDDL and excludes trailing NUL padding.
 `patch_approval` owns denial/staleness/restart and exact-edit/size rejection.
 `patch_recovery` observes real SQLite intent/staged/result failures, signals an
 owned child boundary, kills that child, and reopens through the engine. It covers
 unchanged/applied/changed-byte/changed-metadata recovery and abandonment, retaining
 a user-owned staging-like sentinel. These are bounded cases, not stress loops.
+The recovery flow also covers old padded intents and materializes the actual
+`ReplaceFileW` merge through an external native fixture after child termination.
+It verifies that matching new bytes with the intermediate expanded ACL remain
+unknown and retain evidence. This tests the recovery state at the restoration
+gap, not a timed kill inside the production native calls or power-loss durability.
 `scope` adds write denials; `cli_flow` checks output-only suspension with stdin
 left open. Native ACL assertions use owned fixtures and require no credentials.
 

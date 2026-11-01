@@ -44,10 +44,23 @@ fn patch_crash_child() {
 #[tokio::test]
 async fn interrupted_patch_reconciles_bytes_and_metadata_without_replaying_effects() {
     for branch in [
-        "intent", "staged", "applied", "metadata", "content", "abandon",
+        "intent",
+        "staged",
+        "applied",
+        "metadata",
+        "content",
+        "abandon",
+        "native_merge",
     ] {
         let root = tempfile::tempdir().unwrap();
         let w = root.path().join("workspace");
+        #[cfg(windows)]
+        if matches!(branch, "applied" | "native_merge") {
+            native_acl::legacy_parent(&w);
+        } else {
+            std::fs::create_dir(&w).unwrap();
+        }
+        #[cfg(not(windows))]
         std::fs::create_dir(&w).unwrap();
         std::fs::write(w.join("file.txt"), "before\n").unwrap();
         let sentinel = w.join(".harness-patch-user-owned-stage");
@@ -81,7 +94,50 @@ async fn interrupted_patch_reconciles_bytes_and_metadata_without_replaying_effec
         let turn = TurnId(ids[1]);
         let c = Connection::open(root.path().join("data/harness.sqlite")).unwrap();
         c.execute_batch("DROP TRIGGER owned_failure").unwrap();
+        #[cfg(windows)]
+        if branch == "native_merge" {
+            let serialized: String = c
+                .query_row("SELECT intent FROM patch_attempts", [], |r| r.get(0))
+                .unwrap();
+            let intent: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(
+                intent["expected_metadata"],
+                intent["prepared"]["before_metadata"]
+            );
+            assert_eq!(
+                intent["expected_metadata"]["security"],
+                native_acl::raw_acl(&w.join("file.txt"))
+            );
+            let backup = std::path::Path::new(intent["backup"].as_str().unwrap());
+            assert_eq!(std::fs::read(backup).unwrap(), b"before\n");
+        }
+        if matches!(branch, "applied" | "staged") {
+            // Old builds serialized spare SDDL buffer NULs. Reopen must compare
+            // their logical strings without rewriting the durable evidence.
+            let serialized: String = c
+                .query_row("SELECT intent FROM patch_attempts", [], |r| r.get(0))
+                .unwrap();
+            let mut intent: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+            for pointer in [
+                "/prepared/before_metadata/security",
+                "/prepared/parent_metadata/security",
+                "/expected_metadata/security",
+            ] {
+                let Some(security) = intent.pointer_mut(pointer) else {
+                    assert_eq!(branch, "staged"); // No intended create metadata yet.
+                    continue;
+                };
+                *security =
+                    serde_json::Value::String(format!("{}\0\0", security.as_str().unwrap()));
+            }
+            c.execute("UPDATE patch_attempts SET intent=?1", [intent.to_string()])
+                .unwrap();
+        }
         c.close().unwrap();
+        #[cfg(windows)]
+        if branch == "native_merge" {
+            native_acl::replace_without_restore(&w.join("file.txt"));
+        }
         #[cfg(windows)]
         if branch == "metadata" {
             native_acl::acl(&w.join("file.txt"), true);
@@ -105,7 +161,7 @@ async fn interrupted_patch_reconciles_bytes_and_metadata_without_replaying_effec
         } else {
             let mut resumed = e.resume(session, turn).await.unwrap();
             let result = resumed.outcome().await.unwrap();
-            if matches!(branch, "metadata" | "content") {
+            if matches!(branch, "metadata" | "content" | "native_merge") {
                 assert_eq!(result.state, TurnState::SuspendedRecovery);
                 assert!(e.preview_patch(session, turn).await.is_err());
                 e.abandon(session, turn).await.unwrap();
@@ -133,7 +189,7 @@ async fn interrupted_patch_reconciles_bytes_and_metadata_without_replaying_effec
             assert_eq!(result[1]["status"], "succeeded");
             assert_eq!(result[1]["reconciled"], true);
         }
-        if matches!(branch, "metadata" | "content") {
+        if matches!(branch, "metadata" | "content" | "native_merge") {
             assert_eq!(result[1]["status"], "abandoned");
         }
         assert_eq!(
@@ -146,6 +202,9 @@ async fn interrupted_patch_reconciles_bytes_and_metadata_without_replaying_effec
         );
         assert!(!w.join("later.txt").exists());
         assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "never remove");
+        if branch == "native_merge" {
+            assert!(w.join("file.txt.owned-merge-backup").exists());
+        }
         e.shutdown().await.unwrap();
     }
 }

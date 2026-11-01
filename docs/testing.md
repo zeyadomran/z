@@ -20,8 +20,10 @@ unchanged. The Rust Windows job retains the credential-free scripted CLI smoke.
 - `engine_flow.rs` owns prompt -> real read/search -> durable closed multi-call
   batch -> approved CRLF/BOM edit -> LF create/edit -> final answer -> shutdown
   -> reopen -> next prompt. Native fixtures verify protected non-default DACL
-  and hidden/archive/not-content-indexed attributes. It checks provider
-  IDs, opaque continuation, sequential results, events and stable epoch input.
+  and hidden/archive/not-content-indexed attributes. It checks
+  metadata strings against independent native reads and edits a file under an
+  explicit legacy no-`AI` parent, reproducing the hosted ACL-merge failure. It checks
+  provider IDs, opaque continuation, sequential results, events and stable epoch input.
   Changing the file after the checkpoint does not replay completed reads. The
   initial added read failed with `Failed` instead of `Completed` against M0;
   implementation then made this flow pass.
@@ -31,6 +33,9 @@ unchanged. The Rust Windows job retains the credential-free scripted CLI smoke.
   kills an owned process after an explicit handshake, and reopens through the
   engine. Completed bytes plus metadata reconcile; changed bytes or ACLs require
   recovery. Abandon preserves known completed effects and unrelated artifacts.
+  Reopen also accepts old trailing-NUL serialization padding without changing ACL
+  semantics. An external native fixture materializes the replacement/restoration
+  gap and verifies unknown recovery with original/intended evidence retained.
 - `openrouter_wire.rs` owns the external adapter contract: real loopback HTTP,
   arbitrary chunk boundaries, comments, fragmented arguments, opaque reasoning,
   repeated terminal usage frames, full `[DONE]`, continuation IDs and routing.
