@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: America/Toronto
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci
+# Add a Cargo ecosystem entry with the first Cargo.toml and committed Cargo.lock.

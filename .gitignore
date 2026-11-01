@@ -1,0 +1,10 @@
+/target/
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-*
+*.db
+*.log
+.DS_Store
+Thumbs.db
