@@ -2,6 +2,7 @@ mod config;
 mod context;
 mod domain;
 mod engine;
+pub mod execution;
 mod journal;
 mod provider;
 mod records;

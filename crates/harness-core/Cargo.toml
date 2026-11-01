@@ -15,12 +15,18 @@ reqwest.workspace = true
 sha2.workspace = true
 httpdate.workspace = true
 
-[target.'cfg(windows)'.dependencies]
-windows-sys.workspace = true
-
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "launcher-fixture"
+path = "tests/fixtures/launcher.rs"
+test = false
+bench = false
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Security", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }
