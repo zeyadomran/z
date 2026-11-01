@@ -105,7 +105,7 @@ $actualDescriptor.DiscretionaryAcl.GetBinaryForm($actualAcl,0)
 # Compare actual SIDs/ACEs, not SDDL aliases (the runner's user can render as LA).
 # 0x1500 covers DACL protection and auto-inheritance/request control bits.
 if (($actualDescriptor.ControlFlags -band 0x1500) -ne 0 -or
-    [Convert]::ToBase64String($expectedAcl) -ne [Convert]::ToBase64String($actualAcl)) {
+    [Convert]::ToBase64String($expectedAcl) -cne [Convert]::ToBase64String($actualAcl)) {
     throw "Legacy parent not established: $actual"
 }
 $actual
