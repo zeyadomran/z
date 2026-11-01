@@ -20,12 +20,12 @@ eligibility for a particular user, workspace, region, or model.
 [registration](https://developers.openai.com/siwc/token-sharing-open-source/sign-in).
 
 The quickstart makes plan usage available to open-source partners and selected
-private clients; running locally alone does not establish eligibility. At this
-review, z has no license file and GitHub reports no license. Before M1b/M6
-distribution qualification, publish under an owner-approved open-source license
-or obtain OpenAI selection for a private client. The public docs do not define
-OpenAI's precise open-source criterion; a license is a prerequisite, not proof
-of acceptance. License selection remains an owner decision.
+private clients; running locally alone does not establish eligibility. The owner
+selected the [MIT license](../../LICENSE) for z on 2026-11-01, resolving the
+previously missing license prerequisite. Before M1b/M6 distribution qualification,
+confirm the shipped source and license establish the documented open-source
+route, or obtain OpenAI selection for a private client. The public docs do not
+define OpenAI's precise open-source criterion; a license is not proof of acceptance.
 [Eligibility](https://developers.openai.com/siwc/quickstart).
 
 The open-source integration documentation directs paid or remotely hosted products to the
@@ -44,7 +44,7 @@ Plan usage grants no access to the user's ChatGPT conversations.
 
 | Gate | Required evidence in M1b/M6 | Status of this research |
 | --- | --- | --- |
-| Distribution | Establish open-source licensing and route eligibility, or obtain private-client selection; obtain separate access if paid/hosted | No license selected; distribution not qualified |
+| Distribution | Ship MIT-licensed source and establish route eligibility, or obtain private-client selection; obtain separate access if paid/hosted | MIT selected and included; distribution not qualified |
 | Own registration | User completes this app's dynamic flow with an eligible account/workspace and grants direct plan usage | Not attempted; no issued registration obtained |
 | Local runtime | System browser, working `127.0.0.1` callback, trusted HTTPS, accurate clock, protected credential persistence | Rust/Windows behavior not exercised |
 | Account access | Selected account catalog, completed subscription response, harness-owned read-tool call and continuation | Not attempted; listing/sign-in alone will not pass |
