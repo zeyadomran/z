@@ -7,11 +7,17 @@ mod native;
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
     #[cfg(windows)]
-    if args[0] != "echo" {
+    if !matches!(args[0].as_str(), "echo" | "echo-environment") {
         return windows_fixture(&args);
     }
     #[cfg(windows)]
-    if let Ok(handle) = std::env::var("FIXTURE_UNRELATED_HANDLE") {
+    if args[0] == "echo-environment" {
+        let handle = std::env::var("FIXTURE_UNRELATED_HANDLE")
+            .expect("explicit child environment must be delivered");
+        assert!(
+            std::env::var_os("PATH").is_none(),
+            "host PATH must not leak"
+        );
         native::try_signal_inherited(&handle);
     }
     assert_eq!(std::io::stdin().read(&mut [0]).unwrap(), 0);

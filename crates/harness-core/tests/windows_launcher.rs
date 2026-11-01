@@ -62,7 +62,11 @@ fn ordinary_arguments_raw_streams_and_closed_stdin() {
         "\\\\\"",
         "&|<>^%!",
     ];
-    let mut args = vec![OsString::from("echo")];
+    assert!(
+        std::env::var_os("PATH").is_some(),
+        "host PATH fixture required"
+    );
+    let mut args = vec![OsString::from("echo-environment")];
     args.extend(values.iter().map(OsString::from));
     let sentinel = native::Event::inherited_sentinel();
     let result = prepare(LaunchSpec {
@@ -149,18 +153,19 @@ fn root_exit_settles_then_cleans_lingering_descendant() {
     let ready = native::Event::new();
     let root_release = native::Event::new();
     let leaf_release = native::Event::new();
-    let result = worker(
-        spec(
-            temp.path(),
-            &[
-                "linger",
-                &ready.name,
-                &root_release.name,
-                &leaf_release.name,
-            ],
-        ),
-        Cancellation::default(),
+    let mut launch = spec(
+        temp.path(),
+        &[
+            "linger",
+            &ready.name,
+            &root_release.name,
+            &leaf_release.name,
+        ],
     );
+    // Root completion transfers supervision to the fixed two-second settling
+    // window even when the original command deadline falls inside that window.
+    launch.timeout = Duration::from_millis(1500);
+    let result = worker(launch, Cancellation::default());
     ready.wait();
     let leaf = pid(temp.path(), "leaf.pid");
     leaf.assert_running();

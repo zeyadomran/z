@@ -87,7 +87,7 @@ pub(super) fn run(mut child: Child, spec: &LaunchSpec, cancel: &Cancellation) ->
                     });
                     Outcome::Failed
                 }
-            } else if started.elapsed() >= spec.timeout {
+            } else if root_exited.is_none() && started.elapsed() >= spec.timeout {
                 Outcome::TimedOut
             } else {
                 result.outcome
