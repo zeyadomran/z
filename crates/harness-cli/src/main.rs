@@ -282,7 +282,7 @@ async fn run(args: Args) -> std::result::Result<u8, String> {
                 ""
             },
             escaped(&usage),
-            guidance(&outcome.reason)
+            guidance(&outcome.reason, &provider)
         )
     };
     output.finish(final_output).await?;
@@ -297,7 +297,7 @@ fn local_data_dir(path: Option<PathBuf>) -> std::result::Result<PathBuf, String>
     path.or_else(|| std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("z-harness")))
         .ok_or_else(|| "set --data-dir to a private local directory outside the workspace".into())
 }
-fn guidance(r: &StopReason) -> &'static str {
+fn guidance(r: &StopReason, provider: &str) -> &'static str {
     match r {
         StopReason::ConsentRequired => {
             "Direct ChatGPT plan usage was not granted. Run auth login chatgpt --profile <saved-profile> --enable-plan-usage, then explicitly resume."
@@ -332,8 +332,14 @@ fn guidance(r: &StopReason) -> &'static str {
         | StopReason::Deadline => {
             "Turn suspended. Resume with --session and --resume-turn, raising the relevant limit, or use `harness abandon --workspace ... --session ... --turn ...`. Compaction is not available yet."
         }
-        StopReason::OutputLimit => {
+        StopReason::OutputLimit if provider == "chatgpt" => {
+            "Turn suspended. For cumulative local output, raise --max-output-bytes and explicitly resume with --session and --resume-turn. ChatGPT's upstream output limit cannot be raised through this route's configuration; retrying unchanged may consume plan usage again. Abandon locally and start a smaller request if the upstream limit persists."
+        }
+        StopReason::OutputLimit if provider == "openrouter" => {
             "Turn suspended. For provider token exhaustion, raise max_output_tokens in the provider JSON; for cumulative local output, raise --max-output-bytes. Resume with --session and --resume-turn, or abandon locally. Reasoning counts toward the provider cap; prior attempts may be billable."
+        }
+        StopReason::OutputLimit => {
+            "Turn suspended. Raise the local --max-output-bytes budget and resume with --session and --resume-turn, or abandon locally."
         }
         StopReason::Protocol | StopReason::InvalidRequest => {
             "Provider protocol/configuration failure. Partial calls were not executed; inspect adapter configuration before retrying."
