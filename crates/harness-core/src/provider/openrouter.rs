@@ -6,8 +6,10 @@ use reqwest::{
     redirect::Policy,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::time::{Duration, SystemTime};
 mod catalog;
+mod reasoning;
 mod stream;
 use catalog::Metadata;
 
@@ -61,7 +63,7 @@ impl OpenRouterConfig {
                 && s.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"-_/.:".contains(&b))
         };
-        if !slug(&self.model)
+        if !slug(self.model.strip_prefix('~').unwrap_or(&self.model))
             || self.upstreams.is_empty()
             || self.upstreams.len() > 8
             || !self.upstreams.iter().all(|s| slug(s))
@@ -102,8 +104,7 @@ fn client(config: &OpenRouterConfig) -> Result<Client> {
         .redirect(Policy::none())
         .no_proxy()
         .connect_timeout(Duration::from_secs(10))
-        .read_timeout(Duration::from_secs(45))
-        .timeout(Duration::from_secs(180));
+        .read_timeout(Duration::from_secs(45));
     if let Some(proxy) = &config.proxy {
         builder =
             builder.proxy(reqwest::Proxy::all(proxy).map_err(|_| config_error("invalid proxy"))?);
@@ -118,14 +119,16 @@ pub struct OpenRouterProvider {
     config: OpenRouterConfig,
     client: Client,
     authorization: HeaderValue,
+    credential_identity: String,
     base: String,
     metadata: Metadata,
 }
 impl OpenRouterProvider {
-    pub async fn from_env(config: OpenRouterConfig) -> Result<Self> {
+    pub async fn from_env(mut config: OpenRouterConfig) -> Result<Self> {
         config.validate()?;
         let client = client(&config)?;
         let metadata = catalog::fetch(&client, "https://openrouter.ai/api/v1", &config).await?;
+        config.model = metadata.model.clone();
         let secret = std::env::var(&config.credential_env).map_err(|_| {
             config_error("configured OpenRouter credential environment variable is unavailable")
         })?;
@@ -139,6 +142,7 @@ impl OpenRouterProvider {
             config,
             client,
             authorization,
+            credential_identity: credential_identity(&secret),
             base: "https://openrouter.ai/api/v1".into(),
             metadata,
         })
@@ -146,6 +150,15 @@ impl OpenRouterProvider {
     /// Controlled external HTTP boundary for offline wire tests. This constructor
     /// cannot read or accept credentials and only permits a loopback HTTP origin.
     pub async fn loopback_fixture(base: String, config: OpenRouterConfig) -> Result<Self> {
+        Self::loopback_fixture_key_revision(base, config, 0).await
+    }
+    /// Simulates key replacement using a numbered dummy credential. It never
+    /// accepts a secret or reads host credentials; only direct loopback is allowed.
+    pub async fn loopback_fixture_key_revision(
+        base: String,
+        mut config: OpenRouterConfig,
+        revision: u64,
+    ) -> Result<Self> {
         config.validate()?;
         let url = reqwest::Url::parse(&base).map_err(|_| config_error("invalid fixture URL"))?;
         if url.scheme() != "http"
@@ -162,12 +175,20 @@ impl OpenRouterProvider {
         }
         let client = client(&config)?;
         let metadata = catalog::fetch(&client, &base, &config).await?;
-        let mut authorization = HeaderValue::from_static("Bearer fixture-not-a-secret");
+        config.model = metadata.model.clone();
+        let secret = if revision == 0 {
+            "fixture-not-a-secret".into()
+        } else {
+            format!("fixture-not-a-secret-{revision}")
+        };
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {secret}"))
+            .map_err(|_| config_error("invalid fixture credential"))?;
         authorization.set_sensitive(true);
         Ok(Self {
             config,
             client,
             authorization,
+            credential_identity: credential_identity(&secret),
             base,
             metadata,
         })
@@ -181,6 +202,16 @@ impl OpenRouterProvider {
         limit: usize,
         progress: watch::Sender<Progress>,
     ) -> Result<ProviderResponse> {
+        // Clear only response payload: keep the engine's attempt/retry counters.
+        // Presentation state from a prior attempt cannot establish this route.
+        progress.send_modify(|p| {
+            p.text.clear();
+            p.usage = None;
+            p.generation_id = None;
+            p.model = None;
+            p.upstream = None;
+            p.bytes = 0;
+        });
         super::scripted::validate(&request)?;
         if self.metadata.retrieved.elapsed().unwrap_or(Duration::MAX) > Duration::from_secs(3600) {
             return Err(config_error(
@@ -208,16 +239,14 @@ impl OpenRouterProvider {
             });
         }
         let mut routing = json!({"only":self.config.upstreams,"order":self.config.upstreams,"allow_fallbacks":self.config.allow_fallbacks,"require_parameters":true,"data_collection":self.config.data_collection,"zdr":self.config.zdr});
+        let mut routes = self.metadata.routes.clone();
         if let Some(route) = opaque_route {
-            let slug = self
-                .metadata
-                .routes
-                .iter()
-                .find(|(_, name)| **name == route)
-                .map(|(slug, _)| slug)
-                .ok_or_else(|| Error::Protocol("opaque route no longer eligible".into()))?;
-            routing["only"] = json!([slug]);
-            routing["order"] = json!([slug]);
+            if !routes.contains_key(&route) {
+                return Err(Error::Protocol("opaque route no longer eligible".into()));
+            }
+            routes.retain(|tag, _| *tag == route);
+            routing["only"] = json!([route]);
+            routing["order"] = json!([route]);
             routing["allow_fallbacks"] = json!(false);
         }
         let mut body = json!({"model":self.config.model,"stream":true,"messages":messages,"tools":serde_json::from_str::<Value>(&request.epoch.tool_schema)?,"max_tokens":self.config.max_output_tokens,"provider":routing});
@@ -268,7 +297,7 @@ impl OpenRouterProvider {
             limit,
             self.config.model.clone(),
             self.metadata.canonical.clone(),
-            self.metadata.routes.values().cloned().collect(),
+            routes,
             progress,
         );
         while let Some(chunk) = match response.chunk().await {
@@ -283,6 +312,14 @@ impl OpenRouterProvider {
         Ok(ProviderResponse::stopped(StopReason::Transport))
     }
 }
+// Deliberately conservative: replacing a key requires a new session, even if
+// the replacement belongs to the same account. Never include this in diagnostics.
+fn credential_identity(secret: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"z/openrouter/credential/v1\0");
+    hash.update(secret.as_bytes());
+    hash.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
 fn transport(e: &reqwest::Error) -> StopReason {
     if e.is_timeout() || e.is_connect() || e.is_body() {
         StopReason::RetryableTransport
@@ -294,7 +331,10 @@ impl Provider for OpenRouterProvider {
     fn binding(&self) -> ProviderBinding {
         ProviderBinding {
             provider: "openrouter".into(),
-            account_ref: self.config.credential_env.clone(),
+            account_ref: format!(
+                "{}:sha256:{}",
+                self.config.credential_env, self.credential_identity
+            ),
             model: self.config.model.clone(),
             options: serde_json::to_string(&self.config).expect("serializable config"),
         }

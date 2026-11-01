@@ -12,10 +12,28 @@ fn config() -> OpenRouterConfig {
 }
 #[tokio::test]
 async fn fragmented_wire_roundtrip_preserves_reasoning_ids_and_usage_snapshot() {
-    let details = json!([{"type":"reasoning.encrypted","id":"opaque-1","data":"unchanged signed data","format":"unknown","index":0}]);
+    let details = json!([{"type":"reasoning.encrypted","id":"opaque-1","data":"unchanged signed data","format":"unknown","index":1}]);
     let mut first = String::from(": keepalive\r\n\r\n");
     first += &event(
         json!({"role":"assistant","content":"Inspecting","reasoning_details":details}),
+        Value::Null,
+    );
+    for _ in 0..300 {
+        first += &event(
+            json!({"reasoning":"think", "reasoning_details":[{"type":"reasoning.text","index":0,"text":"think","signature":null}]}),
+            Value::Null,
+        );
+    }
+    first += &event(
+        json!({"reasoning_details":[{"type":"reasoning.text","index":0,"signature":"signed"}]}),
+        Value::Null,
+    );
+    first += &event(
+        json!({"reasoning_details":[{"type":"reasoning.text","index":0,"signature":"signed"}]}),
+        Value::Null,
+    );
+    first += &event(
+        json!({"reasoning_details":[{"type":"reasoning.encrypted","index":1,"id":"opaque-2","data":"second blob"}]}),
         Value::Null,
     );
     first += &event(
@@ -23,22 +41,31 @@ async fn fragmented_wire_roundtrip_preserves_reasoning_ids_and_usage_snapshot() 
         Value::Null,
     );
     first += &event(
+        json!({"tool_calls":[{"index":0,"id":null,"function":{"name":null,"arguments":null}}]}),
+        Value::Null,
+    );
+    first += &event(
         json!({"tool_calls":[{"index":0,"id":"1","function":{"name":"file","arguments":"th\":\"a.txt\"}"}}]}),
+        Value::Null,
+    );
+    first += &event(
+        json!({"tool_calls":[{"index":0,"id":"call-1","function":{"name":"read_file","arguments":null}}]}),
         json!("tool_calls"),
     );
     first += &format!(
         "data: {}\n\n",
-        json!({"id":"gen-fixture","model":"fixture/model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":15,"completion_tokens":6,"cost":0.001}})
+        json!({"id":"gen-fixture","model":"fixture/model","choices":[{"index":0,"delta":{"reasoning_details":[]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":15,"completion_tokens":6,"cost":0.001}})
     );
     first += "data: [DONE]\n\n";
-    let second = event(json!({"content":"done"}), json!("stop")) + "data: [DONE]\n\n";
+    first = first.replace(",\"provider\":\"Fixture\"", "");
+    let second = event(json!({"content":"done","refusal":""}), json!("stop")) + "data: [DONE]\n\n";
     let (base, server) = serve(vec![Wire::sse(first), Wire::sse(second)]);
-    let mut p = OpenRouterProvider::loopback_fixture(base, config())
-        .await
-        .unwrap();
+    let mut c = config();
+    c.model = "~fixture/latest".into();
+    let mut p = OpenRouterProvider::loopback_fixture(base, c).await.unwrap();
     let (tx, rx) = watch::channel(Progress::default());
     let mut req = request();
-    let r = p.respond(req.clone(), 65536, tx.clone()).await.unwrap();
+    let r = p.respond(req.clone(), 4096, tx.clone()).await.unwrap();
     assert_eq!(r.reason, StopReason::Tools);
     let m = r.message.unwrap();
     assert_eq!(
@@ -49,7 +76,11 @@ async fn fragmented_wire_roundtrip_preserves_reasoning_ids_and_usage_snapshot() 
             arguments: r#"{"path":"a.txt"}"#.into()
         }]
     );
+    let details = json!([details[0], {"type":"reasoning.text","index":0,"text":"think".repeat(300),"signature":"signed"}, {"type":"reasoning.encrypted","index":1,"id":"opaque-2","data":"second blob"}]);
     assert_eq!(m.opaque["reasoning_details"], details);
+    assert_eq!(m.opaque["route"], "fixture");
+    assert!(m.opaque.get("reasoning").is_none());
+    assert!(rx.borrow().bytes < 2200);
     assert_eq!(rx.borrow().usage.as_ref().unwrap()["prompt_tokens"], 15);
     assert_eq!(rx.borrow().text, "Inspecting");
     req.messages.push(ProtocolMessage::AssistantData(m));
@@ -64,6 +95,8 @@ async fn fragmented_wire_roundtrip_preserves_reasoning_ids_and_usage_snapshot() 
         .unwrap();
     assert_eq!(bodies[1]["messages"][2]["reasoning_details"], details);
     assert_eq!(bodies[1]["messages"][3]["tool_call_id"], "call-1");
+    assert_eq!(bodies[0]["model"], "fixture/model");
+    assert_eq!(bodies[1]["provider"]["only"], json!(["fixture"]));
     assert_eq!(bodies[1]["provider"]["require_parameters"], true);
     assert_eq!(bodies[1]["provider"]["allow_fallbacks"], false);
     assert_eq!(bodies[1]["provider"]["data_collection"], "deny");
@@ -76,6 +109,35 @@ async fn wire_terminal_and_account_failures_never_authorize_partial_calls() {
         Value::Null,
     );
     let cases = vec![
+        (
+            Wire::sse(
+                event(
+                    json!({"reasoning_details":[{"type":"reasoning.encrypted","data":"opaque"}]}),
+                    json!("stop"),
+                )
+                .replace(",\"provider\":\"Fixture\"", "")
+                    + "data: [DONE]\n\n",
+            ),
+            StopReason::Protocol,
+        ),
+        (
+            Wire::sse(
+                event(
+                    json!({"tool_calls":[{"index":0,"id":"original","function":{"name":"list_files","arguments":"{}"}}]}),
+                    Value::Null,
+                ) + &event(
+                    json!({"tool_calls":[{"index":0,"id":"different","function":{"name":"list_files"}}]}),
+                    json!("tool_calls"),
+                ) + "data: [DONE]\n\n",
+            ),
+            StopReason::Protocol,
+        ),
+        (
+            Wire::sse(
+                "data: {\"provider\":\"openai\",\"error\":{\"code\":\"server_error\"}}\n\n".into(),
+            ),
+            StopReason::Unavailable,
+        ),
         (Wire::sse(partial.clone()), StopReason::Transport),
         (
             Wire::sse(partial.clone() + "data: {\"error\":{\"code\":402}}\n\n"),
@@ -129,12 +191,20 @@ async fn wire_terminal_and_account_failures_never_authorize_partial_calls() {
     ];
     let reasons = cases.iter().map(|(_, r)| r.clone()).collect::<Vec<_>>();
     let (base, server) = serve(cases.into_iter().map(|(w, _)| w).collect());
-    let mut p = OpenRouterProvider::loopback_fixture(base, config())
-        .await
-        .unwrap();
+    let mut c = config();
+    c.upstreams.push("fixture-other".into());
+    let mut p = OpenRouterProvider::loopback_fixture(base, c).await.unwrap();
     for reason in reasons {
-        let (tx, _) = watch::channel(Progress::default());
-        let r = p.respond(request(), 65536, tx).await.unwrap();
+        let (tx, _) = watch::channel(Progress {
+            upstream: Some("Fixture".into()),
+            ..Progress::default()
+        });
+        let r = match p.respond(request(), 65536, tx).await {
+            Err(Error::Protocol(_)) if reason == StopReason::Protocol => {
+                ProviderResponse::stopped(StopReason::Protocol)
+            }
+            result => result.unwrap(),
+        };
         assert_eq!(r.reason, reason);
         assert!(r.message.is_none());
         if reason == StopReason::Throttled {
@@ -224,13 +294,13 @@ async fn recognized_retries_discard_partial_calls_and_persist_each_usage_snapsho
 
 #[tokio::test]
 async fn catalog_validation_rejects_incompatible_routes_before_inference() {
-    for wrong_route in [false, true] {
+    for invalid in ["output", "route", "ambiguous"] {
         let (base, server) = serve(vec![]);
         let mut c = config();
-        if wrong_route {
-            c.upstreams = vec!["missing-endpoint".into()];
-        } else {
-            c.max_output_tokens = 8192;
+        match invalid {
+            "route" => c.upstreams = vec!["missing-endpoint".into()],
+            "ambiguous" => c.upstreams.push("fixture/spot".into()),
+            _ => c.max_output_tokens = 8192,
         }
         assert!(matches!(
             OpenRouterProvider::loopback_fixture(base, c).await,
@@ -243,4 +313,118 @@ async fn catalog_validation_rejects_incompatible_routes_before_inference() {
                 .is_empty()
         );
     }
+}
+
+#[tokio::test]
+async fn credential_replacement_cannot_read_or_continue_the_previous_session() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let host = Config::new(workspace, root.path().join("data"));
+    let (base, server) = serve(vec![Wire::sse(
+        event(json!({"content":"saved"}), json!("stop")) + "data: [DONE]\n\n",
+    )]);
+    let provider = OpenRouterProvider::loopback_fixture(base, config())
+        .await
+        .unwrap();
+    let mut engine = Engine::open(host.clone(), provider).await.unwrap();
+    let session = engine.create_session().await.unwrap();
+    assert_eq!(
+        engine
+            .submit(session, "inspect".into())
+            .await
+            .unwrap()
+            .outcome()
+            .await
+            .unwrap()
+            .reason,
+        StopReason::Final
+    );
+    let history = engine.history(session).await.unwrap();
+    engine.shutdown().await.unwrap();
+    tokio::task::spawn_blocking(move || server.join().unwrap())
+        .await
+        .unwrap();
+    for revision in [1, 0] {
+        let (base, server) = serve(vec![]);
+        let provider = OpenRouterProvider::loopback_fixture_key_revision(base, config(), revision)
+            .await
+            .unwrap();
+        let mut engine = Engine::open(host.clone(), provider).await.unwrap();
+        if revision == 1 {
+            assert!(matches!(engine.history(session).await, Err(Error::Binding)));
+            assert!(matches!(
+                engine.submit(session, "blocked".into()).await,
+                Err(Error::Binding)
+            ));
+        } else {
+            assert_eq!(engine.history(session).await.unwrap(), history);
+        }
+        engine.shutdown().await.unwrap();
+        assert!(
+            tokio::task::spawn_blocking(move || server.join().unwrap())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn completed_invalid_arguments_return_repairable_results() {
+    let calls = json!([
+        {"index":0,"id":"invalid","type":"function","function":{"name":"read_file","arguments":"{bad"}},
+        {"index":1,"id":"empty","type":"function","function":{"name":"list_files","arguments":""}}
+    ]);
+    let (base, server) = serve(vec![
+        Wire::sse(event(json!({"tool_calls":calls}), json!("tool_calls")) + "data: [DONE]\n\n"),
+        Wire::sse(event(json!({"content":"repaired"}), json!("stop")) + "data: [DONE]\n\n"),
+    ]);
+    let provider = OpenRouterProvider::loopback_fixture(base, config())
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(workspace.join("visible.txt"), "visible").unwrap();
+    let mut engine = Engine::open(Config::new(workspace, root.path().join("data")), provider)
+        .await
+        .unwrap();
+    let session = engine.create_session().await.unwrap();
+    let outcome = engine
+        .submit(session, "inspect".into())
+        .await
+        .unwrap()
+        .outcome()
+        .await
+        .unwrap();
+    assert_eq!(outcome.reason, StopReason::Final);
+    let history = engine.protocol_history(session).await.unwrap();
+    let ProtocolMessage::AssistantData(message) = &history.messages[1] else {
+        panic!("missing completed calls")
+    };
+    assert_eq!(message.calls[0].arguments, "{bad");
+    assert_eq!(message.calls[1].arguments, "{}");
+    let ProtocolMessage::ToolResult { result, .. } = &history.messages[2] else {
+        panic!("missing error result")
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(result).unwrap()["error"],
+        "scoped inspection failed: invalid tool arguments"
+    );
+    let ProtocolMessage::ToolResult { result, .. } = &history.messages[3] else {
+        panic!("missing list result")
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(result).unwrap()["data"]["entries"],
+        json!(["visible.txt"])
+    );
+    engine.shutdown().await.unwrap();
+    let bodies = tokio::task::spawn_blocking(move || server.join().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        bodies[1]["messages"][2]["tool_calls"][0]["function"]["arguments"],
+        "{bad"
+    );
 }

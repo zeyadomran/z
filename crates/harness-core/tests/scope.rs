@@ -8,8 +8,14 @@ async fn scoped_tools_deny_aliases_and_preserve_instruction_provenance() {
     std::fs::write(w.join("AGENTS.md"), "root rule").unwrap();
     std::fs::write(w.join("nested/AGENTS.md"), "nested rule").unwrap();
     std::fs::write(w.join("nested/visible.txt"), "needle\n").unwrap();
+    std::fs::write(w.join("oversized.txt"), vec![b'x'; 1024 * 1024 + 1]).unwrap();
+    std::fs::write(w.join("unsupported.txt"), [0xff, 0xfe]).unwrap();
     std::fs::write(w.join(".ENV"), "secret needle").unwrap();
     std::fs::hard_link(w.join(".ENV"), w.join("alias.txt")).unwrap();
+    for path in ["id_ecdsa", "id_dsa", "_netrc", ".envrc", ".git/config"] {
+        std::fs::create_dir_all(w.join(path).parent().unwrap()).unwrap();
+        std::fs::write(w.join(path), "secret needle").unwrap();
+    }
     #[cfg(windows)]
     {
         std::fs::create_dir(root.path().join("outside")).unwrap();
@@ -33,6 +39,11 @@ async fn scoped_tools_deny_aliases_and_preserve_instruction_provenance() {
         "CON.txt",
         "nested/visible.txt.",
         "escape/private.txt",
+        "id_ecdsa",
+        "id_dsa",
+        "_netrc",
+        ".envrc",
+        ".git/config",
     ];
     let mut frames = Vec::new();
     let mut ids = Vec::new();
@@ -57,6 +68,8 @@ async fn scoped_tools_deny_aliases_and_preserve_instruction_provenance() {
     for (id, name, args) in [
         ("list", "list_files", json!({})),
         ("nested", "read_file", json!({"path":"nested/visible.txt"})),
+        ("search", "search_text", json!({"query":"needle"})),
+        ("invalid", "read_file", json!("malformed JSON arguments")),
     ] {
         frames.push(ScriptFrame::ToolCall(
             serde_json::to_string(&ToolCall {
@@ -112,12 +125,44 @@ async fn scoped_tools_deny_aliases_and_preserve_instruction_provenance() {
     let list = &results.iter().find(|(id, _)| *id == "list").unwrap().1;
     assert_eq!(
         list["data"]["entries"],
-        json!(["AGENTS.md", "nested/AGENTS.md", "nested/visible.txt"])
+        json!([
+            "AGENTS.md",
+            "nested/AGENTS.md",
+            "nested/visible.txt",
+            "oversized.txt",
+            "unsupported.txt"
+        ])
+    );
+    let search = &results.iter().find(|(id, _)| *id == "search").unwrap().1["data"];
+    assert_eq!(search["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(search["skipped_count"], 2);
+    assert_eq!(search["truncated"], true);
+    assert_eq!(search["skipped_files"][0]["path"], "oversized.txt");
+    assert_eq!(search["skipped_files"][1]["path"], "unsupported.txt");
+    assert!(
+        search["skipped_files"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("1 MiB")
+    );
+    assert!(
+        search["skipped_files"][1]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("encoding")
+    );
+    let invalid = &results.iter().find(|(id, _)| *id == "invalid").unwrap().1;
+    assert!(
+        invalid["error"]
+            .as_str()
+            .unwrap()
+            .contains("invalid tool arguments")
     );
     let nested = &results.iter().find(|(id, _)| *id == "nested").unwrap().1;
     assert_eq!(nested["data"]["text"], "needle");
-    assert_eq!(nested["instructions"][1]["origin"], "nested/AGENTS.md");
-    assert_eq!(nested["instructions"][1]["content"], "nested rule");
+    assert_eq!(nested["instructions"].as_array().unwrap().len(), 1);
+    assert_eq!(nested["instructions"][0]["origin"], "nested/AGENTS.md");
+    assert_eq!(nested["instructions"][0]["content"], "nested rule");
     assert!(
         !serde_json::to_string(&request)
             .unwrap()

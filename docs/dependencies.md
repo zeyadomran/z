@@ -55,7 +55,8 @@ Checked against upstream crate metadata/API documentation on 2026-11-01:
 
 - reqwest **0.13.5**, native-tls **0.2.18**, schannel **0.1.30** on Windows:
   native Windows TLS, explicit direct/proxy selection, disabled redirects and
-  connect/read/overall deadlines. Default reqwest features (including implicit
+  connect/read-idle deadlines, with the engine bounding overall active work.
+  Default reqwest features (including implicit
   system proxy discovery) are disabled. Only native-tls/json/stream are enabled.
   [reqwest](https://docs.rs/reqwest/0.13.5/reqwest/),
   [native-tls](https://docs.rs/native-tls/0.2.18/native_tls/).
@@ -64,8 +65,10 @@ Checked against upstream crate metadata/API documentation on 2026-11-01:
 - httpdate **1.0.3** for standard Retry-After HTTP dates;
   [upstream](https://docs.rs/httpdate/1.0.3/httpdate/).
 - windows-sys **0.61.2** for final-handle paths, file link count and drive type.
-  Native unsafe code is confined to the small reviewed workspace handle module;
-  the rest of the workspace denies unsafe code. This does not add command launch.
+  Native unsafe code is confined to the reviewed workspace handle and native
+  execution modules; the rest of the workspace denies unsafe code. The merged
+  [launcher prerequisite](windows-launcher.md) uses additional Windows features
+  of the same crate; agent command execution remains M3 work.
   [bindings](https://docs.rs/windows-sys/0.61.2/windows_sys/).
 - rusqlite's existing version now enables its `backup` feature for consistent
   v1-to-v2 migration backups. SQLite remains the M0 bundled version.

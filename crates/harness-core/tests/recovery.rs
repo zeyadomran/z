@@ -6,7 +6,10 @@ fn crash_fixture_child() {
         return;
     };
     let root = std::path::PathBuf::from(root);
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let (entered, entry) = tokio::sync::oneshot::channel();
         let (_release, release) = tokio::sync::oneshot::channel();
@@ -25,6 +28,16 @@ fn crash_fixture_child() {
         let session = e.create_session().await.unwrap();
         let mut turn = e.submit(session, "wait".into()).await.unwrap();
         entry.await.unwrap();
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        tokio::time::resume();
+        // Kill only after the public durable cursor confirms active accounting.
+        loop {
+            turn.changed().await.unwrap();
+            if e.events(session, EventSequence(0)).await.unwrap().iter().any(|event|
+                matches!(event.event, EventKind::ActiveTimeCheckpoint { active_ms, .. } if active_ms >= 5000)
+            ) { break; }
+        }
         println!("READY {} {}", session.0, turn.id.0);
         turn.outcome().await.unwrap();
     });
@@ -33,6 +46,13 @@ fn crash_fixture_child() {
 async fn process_lock_crosses_data_dirs_and_orphan_requires_explicit_resume() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("workspace")).unwrap();
+    let mut alternate = Engine::open(
+        Config::new(root.path().join("workspace"), root.path().join("alternate")),
+        ScriptedProvider::new(vec![]),
+    )
+    .await
+    .unwrap();
+    let alt = alternate.create_session().await.unwrap();
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "crash_fixture_child", "--nocapture"])
         .env("HARNESS_OWNED_CRASH_FIXTURE", root.path())
@@ -54,13 +74,6 @@ async fn process_lock_crosses_data_dirs_and_orphan_requires_explicit_resume() {
     })
     .await
     .unwrap();
-    let mut alternate = Engine::open(
-        Config::new(root.path().join("workspace"), root.path().join("alternate")),
-        ScriptedProvider::new(vec![]),
-    )
-    .await
-    .unwrap();
-    let alt = alternate.create_session().await.unwrap();
     assert!(matches!(
         alternate.submit(alt, "blocked".into()).await,
         Err(Error::Busy)
@@ -72,11 +85,45 @@ async fn process_lock_crosses_data_dirs_and_orphan_requires_explicit_resume() {
         alternate.submit(alt, "still blocked".into()).await,
         Err(Error::Busy)
     ));
+    let database = root.path().join("data/harness.sqlite");
+    let moved = root.path().join("data/owned-missing.sqlite");
+    std::fs::rename(&database, &moved).unwrap();
+    assert!(matches!(
+        alternate
+            .submit(alt, "missing unresolved store".into())
+            .await,
+        Err(Error::Busy)
+    ));
+    let missing = Engine::open(
+        Config::new(root.path().join("workspace"), root.path().join("data")),
+        ScriptedProvider::new(vec![]),
+    )
+    .await;
+    let refused = matches!(missing, Err(Error::Busy));
+    if let Ok(mut accidentally_created) = missing {
+        accidentally_created.shutdown().await.unwrap();
+        std::fs::remove_file(&database).unwrap();
+    }
+    std::fs::rename(&moved, &database).unwrap();
+    assert!(
+        refused,
+        "opening the original path must not recreate a missing unresolved store"
+    );
+    // Control the wall-clock boundary: the last attempt started hours ago.
+    // Offline recovery wait must not consume the active-work budget.
+    let c = rusqlite::Connection::open(&database).unwrap();
+    c.execute(
+        "UPDATE model_attempts SET started_unix_ms=started_unix_ms-7200000",
+        [],
+    )
+    .unwrap();
+    c.close().unwrap();
     alternate.shutdown().await.unwrap();
     let mut resumed_config = Config::new(root.path().join("workspace"), root.path().join("data"));
     resumed_config.max_output_bytes = 512 * 1024; // Unknown crashed-stream output is conservatively reserved.
+    resumed_config.turn_timeout = std::time::Duration::from_secs(5);
     let mut reopened = Engine::open(
-        resumed_config,
+        resumed_config.clone(),
         ScriptedProvider::new(vec![ScriptStep::reply("wait", "resumed")]),
     )
     .await
@@ -97,6 +144,34 @@ async fn process_lock_crosses_data_dirs_and_orphan_requires_explicit_resume() {
             .state,
         TurnState::Interrupted
     );
+    let mut resumed = reopened.resume(session, turn).await.unwrap();
+    assert_eq!(
+        resumed.outcome().await.unwrap().reason,
+        StopReason::Deadline
+    );
+    assert_eq!(reopened.usage(session).await.unwrap().len(), 1);
+    assert!(
+        reopened
+            .events(session, EventSequence(0))
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| matches!(
+                event.event,
+                EventKind::ActiveTimeRecovered {
+                    uncertain_ms: 1000,
+                    ..
+                }
+            ))
+    );
+    reopened.shutdown().await.unwrap();
+    resumed_config.turn_timeout = std::time::Duration::from_secs(1200);
+    let mut reopened = Engine::open(
+        resumed_config,
+        ScriptedProvider::new(vec![ScriptStep::reply("wait", "resumed")]),
+    )
+    .await
+    .unwrap();
     let mut resumed = reopened.resume(session, turn).await.unwrap();
     assert_eq!(
         resumed.outcome().await.unwrap().text.as_deref(),

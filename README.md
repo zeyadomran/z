@@ -31,12 +31,15 @@ private, local and outside synchronized folders. `--data-dir` selects another
 absolute local directory; it cannot bypass the workspace lock or unresolved
 turn. `--session <id>` continues a completed conversation; `--resume-turn <id>`
 explicitly resumes suspended/interrupted read-only work without resetting budgets.
+`harness abandon --workspace <path> --session <id> --turn <id>` resolves saved
+work locally without credentials or inference, preserving its audit history.
 
 - [Implementation plan](RUST_HARNESS_PLAN.md)
 - [Independent historical reviews](reviews/REVIEW_RECONCILIATION.md)
 - [Contributing/setup](CONTRIBUTING.md)
 - [Historical M0 contracts](docs/m0-contracts.md)
 - [Tests and actual qualification limits](docs/testing.md)
+- [Native Windows launcher prerequisite](docs/windows-launcher.md)
 - [Dependencies/toolchain](docs/dependencies.md)
 - [Repository maintenance](.github/MAINTENANCE.md)
 - [Security reporting](SECURITY.md)

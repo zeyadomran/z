@@ -51,7 +51,7 @@ async fn configured_limits_suspend_without_persisting_partial_response() {
         );
         assert_eq!(outcome.text, None);
         engine.shutdown().await.unwrap();
-        let mut reopened = Engine::open(config, ScriptedProvider::new(vec![]))
+        let mut reopened = Engine::open(config.clone(), ScriptedProvider::new(vec![]))
             .await
             .unwrap();
         assert_eq!(
@@ -65,6 +65,24 @@ async fn configured_limits_suspend_without_persisting_partial_response() {
                 .await,
             Err(Error::Busy)
         ));
+        let attempts = reopened.usage(session).await.unwrap().len();
+        let cancelled = reopened.abandon(session, turn.id).await.unwrap();
+        assert_eq!(cancelled.state, TurnState::Cancelled);
+        assert_eq!(cancelled.reason, StopReason::Cancelled);
+        assert_eq!(reopened.usage(session).await.unwrap().len(), attempts);
+        reopened.shutdown().await.unwrap();
+        let mut reopened = Engine::open(
+            config,
+            ScriptedProvider::new(vec![ScriptStep::reply("new", "ok")]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reopened.turn_outcome(session, turn.id).await.unwrap(),
+            Some(cancelled)
+        );
+        let mut next = reopened.submit(new_session, "new".into()).await.unwrap();
+        assert_eq!(next.outcome().await.unwrap().state, TurnState::Completed);
         reopened.shutdown().await.unwrap();
     }
 }

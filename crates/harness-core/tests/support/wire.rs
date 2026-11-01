@@ -32,6 +32,26 @@ pub fn serve(responses: Vec<Wire>) -> (String, JoinHandle<Vec<Value>>) {
     let server = std::thread::spawn(move || {
         let catalog = json!({"data":[{"id":"fixture/model","canonical_slug":"fixture/model","context_length":128000,"supported_parameters":["tools","max_tokens","reasoning"],"architecture":{"output_modalities":["text"]},"reasoning":{"supported_efforts":["high"]}}]});
         let endpoints = json!({"data":{"endpoints":[{"tag":"fixture","provider_name":"Fixture","context_length":128000,"max_completion_tokens":4096,"supported_parameters":["tools","max_tokens","reasoning"]}]}});
+        let mut catalog = catalog;
+        let mut alias = catalog["data"][0].clone();
+        alias["id"] = json!("~fixture/latest");
+        alias["canonical_slug"] = json!("~fixture/latest");
+        alias["alias_target"] = json!({"slug":"fixture/model"});
+        catalog["data"].as_array_mut().unwrap().push(alias);
+        let mut endpoints = endpoints;
+        let mut duplicate = endpoints["data"]["endpoints"][0].clone();
+        duplicate["tag"] = json!("fixture/spot");
+        endpoints["data"]["endpoints"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        let mut other = endpoints["data"]["endpoints"][0].clone();
+        other["tag"] = json!("fixture-other");
+        other["provider_name"] = json!("Other");
+        endpoints["data"]["endpoints"]
+            .as_array_mut()
+            .unwrap()
+            .push(other);
         let mut all = vec![
             Wire {
                 status: 200,

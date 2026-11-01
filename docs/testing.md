@@ -56,6 +56,13 @@ unchanged. The Rust Windows job retains the credential-free scripted CLI smoke.
   survive reopening.
 - `cancellation.rs` owns cancellation, unread/dropped observers, shutdown and
   engine drop. Durable cleanup is independent of UI consumption.
+- CLI `cli_flow.rs` owns credential-free abandonment of an unavailable provider's
+  suspended turn, durable cancellation, a new scripted prompt, one final answer,
+  and fresh-process session continuation in JSON mode. The output flow injects
+  a blocked writer, verifies coalescing and terminal delivery, and distinguishes
+  tool continuation from a discarded request attempt.
+- `windows_launcher.rs` retains the seven native ownership/cancellation/capture
+  flows from the merged launcher prerequisite. See [its scope](windows-launcher.md).
 
 All engine tests use real internal modules, temporary workspaces and SQLite.
 Only the provider/network boundary, controlled time, owned process death or
@@ -73,14 +80,15 @@ success. The seven required contexts and hooks are unchanged.
 The release CLI smoke uses an owned fresh data directory, verifies a second
 fresh-process invocation with the saved session ID, and checks JSON output.
 Human output visibly escapes terminal/bidi controls. The stdout writer has a
-bounded queue and never owns engine cleanup; blocked output is not a reason to
-leave a turn running. Engine observer-loss tests establish durable cleanup.
+coalesced pending snapshot and never owns engine cleanup; a slow writer alone
+does not cancel work. A broken writer still signals observer loss.
 
 No real OpenRouter inference, key access, paid model call, direct ChatGPT auth,
 patch, command execution, clean-install qualification, hostile-filesystem sandbox,
 disk-full/power-loss behavior, or Linux/macOS runtime qualification is claimed.
 The catalog-only fetch establishes metadata availability, not tool/inference
-eligibility. Native launcher work belongs to #12 and is absent from this PR.
+eligibility. The merged #12 native launcher remains separate from agent tool
+execution; M3 still owns approvals, secret filtering, spools and persistence.
 
 The **live OpenRouter gate remains open in [M6 #9](https://github.com/zeyadomran/z/issues/9)**:
 latest user-selected DeepSeek V4 Flash only, secure key acquisition by the parent,

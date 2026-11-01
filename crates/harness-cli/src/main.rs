@@ -6,7 +6,7 @@ use harness_core::{
 use serde_json::json;
 use std::{path::PathBuf, process::ExitCode, time::Duration};
 mod output;
-use output::{Output, escaped, json_line};
+use output::{Output, Transcript, escaped, json_line};
 #[derive(Parser)]
 #[command(
     name = "harness",
@@ -19,47 +19,64 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
-    /// Inspect a workspace. OpenRouter sends scoped context to the gateway/upstream.
-    Ask {
+    /// Cancel saved unresolved work locally without credentials or inference.
+    Abandon {
         #[arg(long)]
         workspace: PathBuf,
         #[arg(long)]
         data_dir: Option<PathBuf>,
-        #[arg(long,default_value="scripted",value_parser=["scripted","openrouter"])]
-        provider: String,
-        /// Non-secret OpenRouter JSON configuration; unknown fields are rejected.
         #[arg(long)]
-        config: Option<PathBuf>,
+        session: i64,
         #[arg(long)]
-        model: Option<String>,
-        /// Exact catalog endpoint tag. Replaces configured route; disables fallbacks.
-        #[arg(long)]
-        upstream: Option<String>,
-        #[arg(long)]
-        session: Option<i64>,
-        /// Explicitly resume this suspended/interrupted turn (requires --session).
-        #[arg(long, requires = "session", conflicts_with = "prompt")]
-        resume_turn: Option<i64>,
-        #[arg(long,default_value="inspect",value_parser=["inspect","supervised"])]
-        policy: String,
-        #[arg(long)]
-        instructions: Option<PathBuf>,
-        #[arg(long, default_value_t = 30)]
-        max_requests: usize,
-        #[arg(long, default_value_t = 60)]
-        max_tools: usize,
-        #[arg(long, default_value_t = 1200)]
-        active_seconds: u64,
-        #[arg(long, default_value_t = 262144)]
-        max_output_bytes: usize,
-        #[arg(long, default_value_t = 128000)]
-        context_tokens: usize,
-        /// Versioned NDJSON output only; never consumes approval input.
+        turn: i64,
         #[arg(long)]
         json: bool,
-        #[arg(required_unless_present = "resume_turn")]
-        prompt: Option<String>,
     },
+    /// Inspect a workspace. OpenRouter sends scoped context to the gateway/upstream.
+    Ask(Box<AskArgs>),
+}
+#[derive(clap::Args)]
+struct AskArgs {
+    #[arg(long)]
+    workspace: PathBuf,
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    #[arg(long,default_value="scripted",value_parser=["scripted","openrouter"])]
+    provider: String,
+    /// Non-secret OpenRouter JSON configuration; unknown fields are rejected.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    #[arg(long)]
+    model: Option<String>,
+    /// Exact catalog endpoint tag. Replaces configured route; disables fallbacks.
+    #[arg(long)]
+    upstream: Option<String>,
+    #[arg(long)]
+    session: Option<i64>,
+    /// Explicitly resume this suspended/interrupted turn (requires --session).
+    #[arg(long, requires = "session", conflicts_with = "prompt")]
+    resume_turn: Option<i64>,
+    #[arg(long,default_value="inspect",value_parser=["inspect","supervised"])]
+    policy: String,
+    #[arg(long)]
+    instructions: Option<PathBuf>,
+    #[arg(long, default_value_t = 30)]
+    max_requests: usize,
+    #[arg(long, default_value_t = 60)]
+    max_tools: usize,
+    #[arg(long, default_value_t = 1200)]
+    active_seconds: u64,
+    #[arg(long, default_value_t = 262144)]
+    max_output_bytes: usize,
+    #[arg(long, default_value_t = 524288)]
+    max_request_bytes: usize,
+    #[arg(long, default_value_t = 128000)]
+    context_tokens: usize,
+    /// Versioned NDJSON output only; never consumes approval input.
+    #[arg(long)]
+    json: bool,
+    #[arg(required_unless_present = "resume_turn")]
+    prompt: Option<String>,
 }
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -72,7 +89,41 @@ async fn main() -> ExitCode {
     }
 }
 async fn run(args: Args) -> std::result::Result<u8, String> {
-    let Command::Ask {
+    if let Command::Abandon {
+        workspace,
+        data_dir,
+        session,
+        turn,
+        json,
+    } = args.command
+    {
+        let config = Config::new(workspace, local_data_dir(data_dir)?);
+        let mut engine = Engine::open(config, ScriptedProvider::new(vec![]))
+            .await
+            .map_err(|e| e.to_string())?;
+        let outcome = engine.abandon(SessionId(session), TurnId(turn)).await;
+        let shutdown = engine.shutdown().await;
+        let outcome = outcome.map_err(|e| e.to_string())?;
+        shutdown.map_err(|e| e.to_string())?;
+        let output = Output::new(json);
+        output
+            .finish(if json {
+                json_line(
+                    json!({"version":1,"kind":"terminal","session":session,"outcome":outcome}),
+                )
+            } else {
+                format!(
+                    "session={} turn={} state={:?} reason={:?}\n",
+                    session, turn, outcome.state, outcome.reason
+                )
+            })
+            .await?;
+        return Ok(0);
+    }
+    let Command::Ask(ask) = args.command else {
+        unreachable!()
+    };
+    let AskArgs {
         workspace,
         data_dir,
         provider,
@@ -87,13 +138,12 @@ async fn run(args: Args) -> std::result::Result<u8, String> {
         max_tools,
         active_seconds,
         max_output_bytes,
+        max_request_bytes,
         context_tokens,
         json: json_mode,
         prompt,
-    } = args.command;
-    let data_dir = data_dir
-        .or_else(|| std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("z-harness")))
-        .ok_or("set --data-dir to a private local directory outside the workspace")?;
+    } = *ask;
+    let data_dir = local_data_dir(data_dir)?;
     let backend: Box<dyn Provider> = if provider == "openrouter" {
         let mut c = if let Some(path) = config {
             let bytes = std::fs::read(path).map_err(|_| "cannot read provider config")?;
@@ -138,6 +188,7 @@ async fn run(args: Args) -> std::result::Result<u8, String> {
     c.max_tool_calls = max_tools;
     c.turn_timeout = Duration::from_secs(active_seconds);
     c.max_output_bytes = max_output_bytes;
+    c.max_request_bytes = max_request_bytes;
     c.context_tokens = context_tokens;
     c.user_instructions = instructions;
     c.policy = if policy == "inspect" {
@@ -146,13 +197,13 @@ async fn run(args: Args) -> std::result::Result<u8, String> {
         Policy::Supervised
     };
     let mut engine = Engine::open(c, backend).await.map_err(|e| e.to_string())?;
-    let output = Output::new();
+    let output = Output::new(json_mode);
     let mut failure = output.failed.clone();
     let operation=async{
         let session=match session{Some(id)=>SessionId(id),None=>engine.create_session().await.map_err(|e|e.to_string())?};
         let mut turn=if let Some(id)=resume_turn{engine.resume(session,TurnId(id)).await}else{engine.submit(session,prompt.unwrap_or_default()).await}.map_err(|e|e.to_string())?;
-        output.send(if json_mode{json_line(json!({"version":1,"kind":"accepted","session":session,"turn":turn.id}))}else{format!("session={} turn={} provider={}\n",session.0,turn.id.0,provider)})?;
-        let mut progress=turn.progress_receiver();let mut displayed=String::new();
+        output.start(if json_mode{json_line(json!({"version":1,"kind":"accepted","session":session,"turn":turn.id}))}else{format!("session={} turn={} provider={}\n",session.0,turn.id.0,provider)})?;
+        let mut progress=turn.progress_receiver();let mut transcript=Transcript::default();
         let outcome=loop{
             tokio::select!{biased;
                 o=turn.outcome()=>break o.map_err(|e|e.to_string())?,
@@ -162,18 +213,21 @@ async fn run(args: Args) -> std::result::Result<u8, String> {
                     if changed.is_err(){continue;}
                     let p=progress.borrow_and_update().clone();
                     let text=if json_mode{json_line(json!({"version":1,"kind":"progress","snapshot":p}))}else{
-                        let delta=if p.text.starts_with(&displayed){p.text[displayed.len()..].to_owned()}else{format!("\n[attempt replaced; prior display is incomplete]\n{}",p.text)};
-                        displayed=p.text;escaped(&delta)
+                        transcript.observe(&p);transcript.text.clone()
                     };
-                    if output.send(text).is_err(){turn.cancel();return Err("stdout stalled; cancelling turn".into());}
+                    if output.send(text).is_err(){turn.cancel();return Err("stdout observer lost; cancelling turn".into());}
                 }
             }
         };
+        if !json_mode {
+            transcript.observe(&progress.borrow());
+            if let Some(text)=&outcome.text { transcript.append(text); }
+        }
         let usage=engine.usage(session).await.map_err(|e|e.to_string())?;
-        Ok::<_,String>((session,outcome,usage))
+        Ok::<_,String>((session,outcome,usage,transcript.text))
     }.await;
     let shutdown = engine.shutdown().await;
-    let (session, outcome, usage) = operation?;
+    let (session, outcome, usage, transcript) = operation?;
     shutdown.map_err(|e| e.to_string())?;
     let final_output = if json_mode {
         json_line(
@@ -191,15 +245,15 @@ async fn run(args: Args) -> std::result::Result<u8, String> {
             .collect::<Vec<_>>()
             .join("; ");
         format!(
-            "\nstate={:?} reason={:?}\n{}\nusage={}\n{}\n",
+            "{}\nstate={:?} reason={:?}\n{}usage={}\n{}\n",
+            transcript,
             outcome.state,
             outcome.reason,
-            escaped(
-                outcome
-                    .text
-                    .as_deref()
-                    .unwrap_or("No completed final answer.")
-            ),
+            if outcome.text.is_none() {
+                "No completed final answer.\n"
+            } else {
+                ""
+            },
             escaped(&usage),
             guidance(&outcome.reason)
         )
@@ -211,6 +265,10 @@ async fn run(args: Args) -> std::result::Result<u8, String> {
         TurnState::SuspendedLimit => 3,
         _ => 1,
     })
+}
+fn local_data_dir(path: Option<PathBuf>) -> std::result::Result<PathBuf, String> {
+    path.or_else(|| std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("z-harness")))
+        .ok_or_else(|| "set --data-dir to a private local directory outside the workspace".into())
 }
 fn guidance(r: &StopReason) -> &'static str {
     match r {
@@ -231,7 +289,7 @@ fn guidance(r: &StopReason) -> &'static str {
         | StopReason::ToolLimit
         | StopReason::OutputLimit
         | StopReason::Deadline => {
-            "Turn suspended. Resume with --session and --resume-turn, explicitly raising the relevant host limit. Compaction is not available yet."
+            "Turn suspended. Resume with --session and --resume-turn, raising the relevant limit, or use `harness abandon --workspace ... --session ... --turn ...`. Compaction is not available yet."
         }
         StopReason::Protocol | StopReason::InvalidRequest => {
             "Provider protocol/configuration failure. Partial calls were not executed; inspect adapter configuration before retrying."

@@ -38,6 +38,9 @@ fn credential(name: &str) -> bool {
                 | ".npmrc"
                 | ".pypirc"
                 | ".netrc"
+                | "_netrc"
+                | ".envrc"
+                | ".git"
                 | ".git-credentials"
                 | ".docker"
                 | ".kube"
@@ -49,6 +52,8 @@ fn credential(name: &str) -> bool {
                 | "secrets.json"
                 | "auth.json"
                 | "id_rsa"
+                | "id_ecdsa"
+                | "id_dsa"
                 | "id_ed25519"
         )
         || n.ends_with(".pem")
@@ -218,8 +223,16 @@ impl Workspace {
         ))
     }
     pub fn instructions(&self, input: &str) -> Result<Vec<Instruction>> {
+        self.load_instructions(input, true)
+    }
+    fn load_instructions(&self, input: &str, include_root: bool) -> Result<Vec<Instruction>> {
         self.resolve(input)?;
-        let mut dirs = vec![String::new()];
+        // The root snapshot already belongs to the immutable epoch prefix.
+        let mut dirs = if include_root {
+            vec![String::new()]
+        } else {
+            vec![]
+        };
         let components: Vec<_> = input.split(['/', '\\']).filter(|c| !c.is_empty()).collect();
         if components.len() > 16 {
             return Err(Error::Scope("instruction depth exceeds 16".into()));
@@ -270,7 +283,7 @@ impl Workspace {
                 "limit must be 1..200; offset <=1000000".into(),
             ));
         }
-        let mut instructions = self.instructions(&args.path)?;
+        let mut instructions = self.load_instructions(&args.path, false)?;
         let value = match name {
             "read_file" if args.query.is_none() => {
                 let (text, sha256, bom, newline) = self.read(&args.path)?;
@@ -281,7 +294,7 @@ impl Workspace {
                 let paths = self.files(&args.path)?;
                 let page: Vec<_> = paths.iter().skip(args.offset).take(args.limit).collect();
                 for path in &page {
-                    instructions.extend(self.instructions(path)?);
+                    instructions.extend(self.load_instructions(path, false)?);
                 }
                 json!({"entries":page,"next_offset":(paths.len()>args.offset+page.len()).then_some(args.offset+page.len())})
             }
@@ -294,10 +307,22 @@ impl Workspace {
                 let mut matched = 0usize;
                 let mut instruction_paths = std::collections::BTreeSet::new();
                 let mut inspected = 0;
+                let mut skipped_count = 0;
+                let mut skipped_files = Vec::new();
                 let started = std::time::Instant::now();
                 for path in self.files(&args.path)? {
-                    let Ok((text, _, _, _)) = self.read(&path) else {
-                        continue;
+                    if started.elapsed() > std::time::Duration::from_secs(5) {
+                        return Err(Error::Scope("search scan cap reached; narrow path".into()));
+                    }
+                    let text = match self.read(&path) {
+                        Ok((text, _, _, _)) => text,
+                        Err(error) => {
+                            skipped_count += 1;
+                            if skipped_files.len() < 20 {
+                                skipped_files.push(json!({"path":path,"reason":error.to_string()}));
+                            }
+                            continue;
+                        }
                     };
                     inspected += text.len();
                     if inspected > 8 * 1024 * 1024
@@ -315,7 +340,7 @@ impl Workspace {
                                     ));
                                 }
                                 if instruction_paths.insert(path.clone()) {
-                                    instructions.extend(self.instructions(&path)?);
+                                    instructions.extend(self.load_instructions(&path, false)?);
                                 }
                                 matches.push(json!({"path":path,"line":line+1,"text":text}));
                             }
@@ -329,7 +354,7 @@ impl Workspace {
                         break;
                     }
                 }
-                json!({"matches":matches.iter().take(args.limit).collect::<Vec<_>>(),"next_offset":(matches.len()>args.limit).then_some(args.offset+args.limit)})
+                json!({"matches":matches.iter().take(args.limit).collect::<Vec<_>>(),"next_offset":(matches.len()>args.limit).then_some(args.offset+args.limit),"truncated":skipped_count>0 || matches.len()>args.limit,"skipped_count":skipped_count,"skipped_details_truncated":skipped_count>skipped_files.len(),"skipped_files":skipped_files})
             }
             _ => {
                 return Err(Error::Scope(

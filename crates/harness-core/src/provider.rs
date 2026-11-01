@@ -62,6 +62,11 @@ pub struct Capabilities {
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Progress {
+    /// Engine-owned request identity, retained even when text is coalesced.
+    #[serde(default)]
+    pub attempt: usize,
+    #[serde(default)]
+    pub discarded_attempts: usize,
     pub text: String,
     pub usage: Option<Value>,
     pub generation_id: Option<String>,

@@ -12,7 +12,7 @@ pub(super) struct Stream {
     limit: usize,
     model: String,
     canonical: String,
-    routes: Vec<String>,
+    routes: BTreeMap<String, String>,
     progress: watch::Sender<Progress>,
 }
 fn protocol() -> Error {
@@ -23,7 +23,7 @@ impl Stream {
         limit: usize,
         model: String,
         canonical: String,
-        routes: Vec<String>,
+        routes: BTreeMap<String, String>,
         progress: watch::Sender<Progress>,
     ) -> Self {
         Self {
@@ -93,6 +93,18 @@ impl Stream {
             return self.complete().map(Some);
         }
         let v: Value = serde_json::from_slice(data).map_err(|_| protocol())?;
+        if let Some(usage) = v.get("usage").filter(|u| !u.is_null()) {
+            if !usage.is_object() {
+                return Err(protocol());
+            }
+            self.progress.send_modify(|p| p.usage = Some(usage.clone()));
+        }
+        if v.get("error").is_some_and(|e| !e.is_null()) {
+            return Ok(Some(ProviderResponse::stopped(error_reason(
+                v["error"]["code"].as_u64().unwrap_or(0) as u16,
+                &v,
+            ))));
+        }
         for (key, target) in [("id", 0), ("model", 1), ("provider", 2)] {
             if let Some(value) = v.get(key).and_then(Value::as_str) {
                 if value.len() > 256 {
@@ -101,7 +113,7 @@ impl Stream {
                 if target == 1 && value != self.model && value != self.canonical {
                     return Err(protocol());
                 }
-                if target == 2 && !self.routes.iter().any(|r| r == value) {
+                if target == 2 && !self.routes.values().any(|r| r == value) {
                     return Err(protocol());
                 }
                 let mut conflict = false;
@@ -121,18 +133,6 @@ impl Stream {
                     return Err(protocol());
                 }
             }
-        }
-        if let Some(usage) = v.get("usage").filter(|u| !u.is_null()) {
-            if !usage.is_object() {
-                return Err(protocol());
-            }
-            self.progress.send_modify(|p| p.usage = Some(usage.clone()));
-        }
-        if v.get("error").is_some() {
-            return Ok(Some(ProviderResponse::stopped(error_reason(
-                v["error"]["code"].as_u64().unwrap_or(0) as u16,
-                &v,
-            ))));
         }
         let choices = v["choices"].as_array().ok_or_else(protocol)?;
         if choices.is_empty() {
@@ -171,50 +171,22 @@ impl Stream {
         let has_payload = !content.is_empty()
             || ["tool_calls", "reasoning_details", "reasoning", "refusal"]
                 .iter()
-                .any(|k| delta.get(*k).is_some_and(|v| !v.is_null() && v != ""));
+                .any(|k| {
+                    delta.get(*k).is_some_and(|v| {
+                        !v.is_null() && v != "" && !v.as_array().is_some_and(Vec::is_empty)
+                    })
+                });
         if self.finish.is_some() && has_payload {
             return Err(protocol());
         }
         self.message.text.push_str(content);
-        self.bytes = self.bytes.saturating_add(content.len());
         if let Some(refusal) = delta.get("refusal").filter(|v| !v.is_null()) {
             if !refusal.is_string() {
                 return Err(protocol());
             }
-            self.refused = true;
+            self.refused |= refusal.as_str().is_some_and(|s| !s.is_empty());
         }
-        if let Some(reasoning) = delta.get("reasoning").filter(|v| !v.is_null()) {
-            let text = reasoning.as_str().ok_or_else(protocol)?;
-            self.bytes += text.len();
-            let old = self
-                .message
-                .opaque
-                .get("reasoning")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let full = format!("{old}{text}");
-            if !self.message.opaque.is_object() {
-                self.message.opaque = json!({});
-            }
-            self.message.opaque["reasoning"] = json!(full);
-        }
-        if let Some(details) = delta.get("reasoning_details").filter(|v| !v.is_null()) {
-            let details = details.as_array().ok_or_else(protocol)?;
-            if !details.iter().all(Value::is_object) {
-                return Err(protocol());
-            }
-            self.bytes += serde_json::to_vec(details)?.len();
-            if !self.message.opaque.is_object() {
-                self.message.opaque = json!({});
-            }
-            if self.message.opaque.get("reasoning_details").is_none() {
-                self.message.opaque["reasoning_details"] = json!([]);
-            }
-            self.message.opaque["reasoning_details"]
-                .as_array_mut()
-                .ok_or_else(protocol)?
-                .extend(details.iter().cloned());
-        }
+        super::reasoning::append(&mut self.message.opaque, delta)?;
         if let Some(calls) = delta.get("tool_calls").filter(|v| !v.is_null()) {
             for call in calls.as_array().ok_or_else(protocol)? {
                 let index = call["index"]
@@ -239,22 +211,37 @@ impl Stream {
                     name: String::new(),
                     arguments: String::new(),
                 });
+                let sealed = serde_json::from_str::<Value>(&assembled.arguments).is_ok();
                 for (value, target) in [
                     (call.get("id"), &mut assembled.id),
                     (
                         call.get("function").and_then(|f| f.get("name")),
                         &mut assembled.name,
                     ),
-                    (
-                        call.get("function").and_then(|f| f.get("arguments")),
-                        &mut assembled.arguments,
-                    ),
                 ] {
-                    if let Some(value) = value {
+                    if let Some(value) = value.filter(|v| !v.is_null()) {
                         let fragment = value.as_str().ok_or_else(protocol)?;
-                        self.bytes += fragment.len();
-                        target.push_str(fragment);
+                        if fragment.is_empty() || fragment == target {
+                            continue;
+                        }
+                        if sealed && !target.is_empty() {
+                            return Err(protocol());
+                        }
+                        if !target.is_empty() && fragment.starts_with(target.as_str()) {
+                            *target = fragment.into();
+                        } else {
+                            target.push_str(fragment);
+                        }
                     }
+                }
+                if let Some(value) = call
+                    .get("function")
+                    .and_then(|f| f.get("arguments"))
+                    .filter(|v| !v.is_null())
+                {
+                    assembled
+                        .arguments
+                        .push_str(value.as_str().ok_or_else(protocol)?);
                 }
                 if assembled.id.len() > 256
                     || assembled.name.len() > 128
@@ -264,6 +251,19 @@ impl Stream {
                 }
             }
         }
+        // Budget the assembled payload, not repeated per-chunk envelopes or the
+        // compatibility reasoning string duplicated by reasoning_details.
+        self.bytes = self.message.text.len()
+            + self
+                .calls
+                .values()
+                .map(|c| c.id.len() + c.name.len() + c.arguments.len())
+                .sum::<usize>()
+            + if self.message.opaque.is_object() {
+                serde_json::to_vec(&self.message.opaque)?.len()
+            } else {
+                0
+            };
         self.progress.send_modify(|p| {
             p.text = self.message.text.clone();
             p.bytes = self.bytes;
@@ -311,14 +311,36 @@ impl Stream {
                 || call.id.is_empty()
                 || call.name.is_empty()
                 || !ids.insert(&call.id)
-                || !serde_json::from_str::<Value>(&call.arguments).is_ok_and(|v| v.is_object())
             {
                 return Err(protocol());
             }
         }
+        // An empty argument string denotes no supplied parameters. Malformed
+        // nonempty JSON remains raw for a structured, repairable workspace error.
+        for call in self.calls.values_mut() {
+            if call.arguments.is_empty() {
+                call.arguments = "{}".into();
+                self.bytes += 2;
+            }
+        }
+        if self.bytes > self.limit {
+            return Ok(ProviderResponse::stopped(StopReason::OutputLimit));
+        }
+        self.progress.send_modify(|p| p.bytes = self.bytes);
         self.message.calls = std::mem::take(&mut self.calls).into_values().collect();
         if self.message.opaque.is_object() {
-            self.message.opaque["route"] = json!(progress.upstream.ok_or_else(protocol)?);
+            let route = if let Some(upstream) = progress.upstream {
+                self.routes
+                    .iter()
+                    .find(|(_, name)| **name == upstream)
+                    .map(|(tag, _)| tag)
+            } else if self.routes.len() == 1 {
+                self.routes.keys().next()
+            } else {
+                None
+            }
+            .ok_or_else(protocol)?;
+            self.message.opaque["route"] = json!(route);
         }
         Ok(ProviderResponse {
             reason,

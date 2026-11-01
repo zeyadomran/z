@@ -88,6 +88,15 @@ pub enum EventKind {
     BatchClosed {
         turn_id: TurnId,
     },
+    ActiveTimeRecovered {
+        turn_id: TurnId,
+        /// Conservative reserve since the last durable active checkpoint.
+        uncertain_ms: i64,
+    },
+    ActiveTimeCheckpoint {
+        turn_id: TurnId,
+        active_ms: i64,
+    },
     Usage {
         turn_id: TurnId,
         raw: Option<serde_json::Value>,

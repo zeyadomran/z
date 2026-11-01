@@ -67,6 +67,7 @@ impl Engine {
             .map_err(|_| Error::Worker)??;
         let workspace = config.workspace_identity()?;
         let binding = provider.binding();
+        let _creation_guard = WorkspaceLock::guard_creation(&config, &workspace).await?;
         let (store, worker) = Store::open(config.data_dir.join("harness.sqlite")).await?;
         Ok(Self {
             config,
@@ -108,6 +109,29 @@ impl Engine {
     pub async fn resume(&mut self, session: SessionId, turn: TurnId) -> Result<TurnHandle> {
         self.launch(session, None, Some(turn)).await
     }
+    /// Explicitly abandon unresolved read-only work without inference or budget
+    /// checks. Pending results and the terminal outcome are committed atomically.
+    /// This local user action needs workspace ownership, not provider credentials;
+    /// it never changes the session binding or authorizes subsequent inference.
+    pub async fn abandon(&mut self, session: SessionId, turn: TurnId) -> Result<TurnOutcome> {
+        self.store()?;
+        if let Some(active) = &self.active
+            && !active.task.is_finished()
+            && active.outcome.borrow().is_none()
+        {
+            return Err(Error::Busy);
+        }
+        if let Some(active) = self.active.take() {
+            // A prior persistence error does not forbid explicit recovery.
+            let _ = active.task.await.map_err(|_| Error::Worker)?;
+        }
+        let lock = WorkspaceLock::acquire(&self.config, &self.workspace).await?;
+        let outcome = journal::abandon(self.store()?, self.workspace.clone(), session, turn).await;
+        let cleanup = lock
+            .release_if_resolved(self.store()?, &self.workspace)
+            .await;
+        outcome.and_then(|outcome| cleanup.map(|()| outcome))
+    }
     async fn launch(
         &mut self,
         session: SessionId,
@@ -135,32 +159,43 @@ impl Engine {
         let workspace = self.workspace.clone();
         let binding = self.binding.clone();
         let task = tokio::spawn(async move {
+            let config_workspace = workspace.clone();
             let prepare = async {
                 let lock = WorkspaceLock::acquire(&config, &workspace).await?;
-                journal::reconcile(&store, workspace.clone()).await?;
-                let (turn, request, seq) = if let Some(turn) = resume {
-                    let r = journal::resume(
-                        &store,
-                        workspace,
-                        session,
-                        turn,
-                        binding,
-                        config.limits_json()?,
-                    )
-                    .await?;
-                    (turn, r, EventSequence(0))
-                } else {
-                    records::start(
-                        &store,
-                        workspace,
-                        session,
-                        prompt.ok_or(Error::Worker)?,
-                        config.limits_json()?,
-                        binding,
-                    )
-                    .await?
-                };
-                Ok::<_, Error>((lock, turn, request, seq))
+                let prepared = async {
+                    journal::reconcile(&store, workspace.clone()).await?;
+                    let (turn, request, seq) = if let Some(turn) = resume {
+                        let r = journal::resume(
+                            &store,
+                            workspace,
+                            session,
+                            turn,
+                            binding,
+                            config.limits_json()?,
+                        )
+                        .await?;
+                        (turn, r, EventSequence(0))
+                    } else {
+                        records::start(
+                            &store,
+                            workspace,
+                            session,
+                            prompt.ok_or(Error::Worker)?,
+                            config.limits_json()?,
+                            binding,
+                        )
+                        .await?
+                    };
+                    Ok::<_, Error>((turn, request, seq))
+                }
+                .await;
+                match prepared {
+                    Ok((turn, request, seq)) => Ok((lock, turn, request, seq)),
+                    Err(error) => {
+                        lock.release_if_resolved(&store, &config_workspace).await?;
+                        Err(error)
+                    }
+                }
             }
             .await;
             let (lock, turn, request, seq) = match prepare {
@@ -173,7 +208,7 @@ impl Engine {
             cursor.send_replace(seq);
             let _ = accepted.send(Ok(turn));
             let outcome = TurnRun {
-                store,
+                store: store.clone(),
                 provider,
                 config,
                 session,
@@ -186,7 +221,8 @@ impl Engine {
             .run()
             .await;
             // Release OS ownership only after all durable work has settled.
-            drop(lock);
+            let cleanup = lock.release_if_resolved(&store, &config_workspace).await;
+            let outcome = outcome.and_then(|outcome| cleanup.map(|()| outcome));
             result.send_replace(Some(outcome.clone()));
             outcome.map(|_| ())
         });

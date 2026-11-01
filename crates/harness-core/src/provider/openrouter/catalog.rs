@@ -4,6 +4,7 @@ pub(super) struct Metadata {
     pub retrieved: SystemTime,
     pub context: usize,
     pub canonical: String,
+    pub model: String,
     pub routes: BTreeMap<String, String>,
 }
 pub(super) async fn bounded_body(
@@ -24,10 +25,12 @@ pub(super) async fn bounded_body(
     Ok(bytes)
 }
 async fn get(client: &Client, url: String) -> Result<Value> {
-    let mut r =
-        client.get(url).send().await.map_err(|_| {
-            config_error("model catalog unavailable; no capability guesses permitted")
-        })?;
+    let mut r = client
+        .get(url)
+        .timeout(Duration::from_secs(180))
+        .send()
+        .await
+        .map_err(|_| config_error("model catalog unavailable; no capability guesses permitted"))?;
     if !r.status().is_success() {
         return Err(config_error(
             "model catalog unavailable; no capability guesses permitted",
@@ -43,10 +46,29 @@ fn supports(v: &Value, parameter: &str) -> bool {
 }
 pub(super) async fn fetch(client: &Client, base: &str, c: &OpenRouterConfig) -> Result<Metadata> {
     let catalog = get(client, format!("{base}/models")).await?;
-    let m = catalog["data"]
+    let models = catalog["data"]
         .as_array()
-        .and_then(|a| a.iter().find(|m| m["id"] == c.model))
+        .ok_or_else(|| config_error("invalid model catalog"))?;
+    let selected = models
+        .iter()
+        .find(|m| m["id"] == c.model)
         .ok_or_else(|| config_error("configured model absent from live catalog"))?;
+    // Public aliases are resolved once, then the concrete target is sent and
+    // bound to the session so alias movement cannot silently switch its model.
+    let m = if let Some(target) = selected.get("alias_target").filter(|v| !v.is_null()) {
+        let slug = target["slug"]
+            .as_str()
+            .ok_or_else(|| config_error("alias target unavailable"))?;
+        models
+            .iter()
+            .find(|m| m["id"] == slug && m.get("alias_target").is_none_or(Value::is_null))
+            .ok_or_else(|| config_error("alias target absent from model catalog"))?
+    } else {
+        selected
+    };
+    let model = m["id"]
+        .as_str()
+        .ok_or_else(|| config_error("model identity unavailable"))?;
     for required in ["tools", "max_tokens"] {
         if !supports(m, required) {
             return Err(config_error(
@@ -75,7 +97,7 @@ pub(super) async fn fetch(client: &Client, base: &str, c: &OpenRouterConfig) -> 
         .filter(|n| *n > 0)
         .ok_or_else(|| config_error("model context limit unavailable"))?
         as usize;
-    let endpoints = get(client, format!("{base}/models/{}/endpoints", c.model)).await?;
+    let endpoints = get(client, format!("{base}/models/{model}/endpoints")).await?;
     let list = endpoints["data"]["endpoints"]
         .as_array()
         .ok_or_else(|| config_error("model endpoint metadata unavailable"))?;
@@ -108,18 +130,22 @@ pub(super) async fn fetch(client: &Client, base: &str, c: &OpenRouterConfig) -> 
             return Err(config_error("output cap exceeds upstream/model allowance"));
         }
         context = context.min(ctx);
-        routes.insert(
-            slug.clone(),
-            endpoint["provider_name"]
-                .as_str()
-                .ok_or_else(|| config_error("upstream identity unavailable"))?
-                .into(),
-        );
+        let name = endpoint["provider_name"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| config_error("upstream identity unavailable"))?;
+        if routes.values().any(|existing: &String| existing == name) || routes.contains_key(slug) {
+            return Err(config_error(
+                "configured endpoint identities are ambiguous; select one exact endpoint tag",
+            ));
+        }
+        routes.insert(slug.clone(), name.into());
     }
     Ok(Metadata {
         retrieved: SystemTime::now(),
         context,
-        canonical: m["canonical_slug"].as_str().unwrap_or(&c.model).into(),
+        canonical: m["canonical_slug"].as_str().unwrap_or(model).into(),
+        model: model.into(),
         routes,
     })
 }
