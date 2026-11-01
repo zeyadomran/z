@@ -14,6 +14,15 @@ Enable Dependabot vulnerability alerts and security fixes, secret scanning and p
 
 ## Dependency updates and Rust activation
 
-Dependabot checks pinned Actions weekly on Monday at 09:00 America/Toronto, groups updates, and uses Conventional Commit prefixes. Review and validate each update; updates are not automatically merged. No npm dependencies or Cargo manifests exist yet.
+Dependabot checks pinned Actions and Cargo dependencies weekly on Monday at
+09:00 America/Toronto, groups updates by ecosystem, and uses Conventional
+Commit prefixes. Review and validate each update; updates are not automatically
+merged. There are no npm dependencies. Cargo.lock records the executable's
+resolved dependency graph.
 
-With the first Cargo workspace, commit Cargo.lock, pin the supported Rust toolchain, add Cargo Dependabot updates, and add mandatory Windows formatting, Clippy, build, and canonical functional checks. Extend CodeQL only with supported languages/configuration verified at that time. Register required contexts only after they actually run. Preserve the existing hook suite rather than adding duplicate tests.
+M0 adds the pinned Rust toolchain and the `Rust (Windows)` CI context for
+formatting, Clippy, the public-engine functional suite, release build and a
+credential-free CLI smoke. Register this required context after its first
+successful run; this implementation does not modify remote branch protection.
+Preserve all existing required contexts and the hook suite. Actions CodeQL
+remains unchanged; Rust source security qualification is not claimed.
