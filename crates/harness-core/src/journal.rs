@@ -285,7 +285,7 @@ pub(crate) async fn resume(
 ) -> Result<ProviderRequest> {
     s.call(move|c|{
     let tx=c.transaction_with_behavior(TransactionBehavior::Immediate)?;records::binding(&tx,session,&w,&b)?;
-    if tx.execute("UPDATE turns SET state='running',outcome=NULL,limits=?1 WHERE id=?2 AND session_id=?3 AND state IN ('interrupted','suspended_limit')",params![limits,t.0,session.0])?!=1{return Err(Error::Busy);}
+    if tx.execute("UPDATE turns SET state='running',outcome=NULL,limits=?1 WHERE id=?2 AND session_id=?3 AND (state IN ('interrupted','suspended_limit') OR (state='suspended_recovery' AND json_extract(outcome,'$.reason') IN ('consent_required','reauthorization_required','subscription_limit','access_blocked','account_diagnosis')))",params![limits,t.0,session.0])?!=1{return Err(Error::Busy);}
     let r=records::request(&tx,session)?;tx.commit()?;Ok(r)
 }).await
 }

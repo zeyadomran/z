@@ -39,6 +39,8 @@ Plan usage grants no access to the user's ChatGPT conversations.
   host identity, verification, refresh, and logout.
 - [Responses adapter](responses.md): account models, request restrictions,
   function continuation, errors, and usage.
+- [Implemented CLI and recovery](usage.md): offline M1b behavior, Windows credential
+  protection, configuration, integration notes and remaining live gates.
 
 ## External prerequisites and release blockers
 

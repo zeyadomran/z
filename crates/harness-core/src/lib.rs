@@ -1,3 +1,4 @@
+pub mod auth;
 mod config;
 mod context;
 mod domain;

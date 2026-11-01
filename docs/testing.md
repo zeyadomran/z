@@ -1,4 +1,4 @@
-# Testing M1a
+# Testing M1a and offline M1b
 
 Run from the repository root with the pinned toolchain:
 
@@ -16,6 +16,29 @@ Never bypass hooks or branch protection. All seven required CI contexts remain
 unchanged. The Rust Windows job retains the credential-free scripted CLI smoke.
 
 ## Canonical flow and failure owners
+
+- `chatgpt_auth.rs` owns the registration/rotation/logout lifecycle using the real
+  Windows DPAPI/DACL vault, native file locks, local HTTP callback and RSA-signed
+  external issuer. It covers state/nonce/issuer/audience/authorized-party/expiry/
+  signature rejection, cancellation after refresh transmission, a controlled
+  atomic replacement failure, retained registration, grant denial, terminal and
+  transient refresh, and an older sign-in racing a durable logout marker. The
+  committed RSA fixture key is deliberately public test-only material and is
+  never trusted by the production issuer path.
+- `chatgpt_wire.rs` owns direct Responses wire behavior through the real engine,
+  SQLite and scoped read tool: ordered done-item reasoning, exact call/output
+  continuation, close/reopen, different-account rejection, quota after streaming,
+  malformed/incomplete/custom-tool rejection and one-refresh 401 recovery through
+  durable engine attempt accounting. The initial executable assertion failed with
+  `Failed` instead of `Completed` before adapter implementation. These fixtures
+  do not qualify an actual ChatGPT account or subscription route.
+
+The M1b release smoke used a fresh owned application-data directory, with no
+credentials: `auth status --json`, auth/models help, scripted JSON completion and
+a second fresh-process session invocation. A native ACL inspection confirmed a
+protected directory DACL granting only the current user full control. This does
+not exercise system-browser delivery, live OAuth/TLS, actual subscription usage,
+power-loss durability or another Windows installation.
 
 - `engine_flow.rs` owns prompt -> real read/search -> durable closed multi-call
   batch -> final answer -> shutdown -> reopen -> next prompt. It checks provider
@@ -92,7 +115,7 @@ Human output visibly escapes terminal/bidi controls. The stdout writer has a
 coalesced pending snapshot and never owns engine cleanup; a slow writer alone
 does not cancel work. A broken writer still signals observer loss.
 
-No real OpenRouter inference, key access, paid model call, direct ChatGPT auth,
+No real OpenRouter inference, key access, paid model call, real ChatGPT sign-in,
 patch, command execution, clean-install qualification, hostile-filesystem sandbox,
 disk-full/power-loss behavior, or Linux/macOS runtime qualification is claimed.
 The catalog-only fetch establishes metadata availability, not tool/inference

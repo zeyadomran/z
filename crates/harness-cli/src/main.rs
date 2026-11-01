@@ -5,13 +5,14 @@ use harness_core::{
 };
 use serde_json::json;
 use std::{path::PathBuf, process::ExitCode, time::Duration};
+mod chatgpt;
 mod output;
 use output::{Output, Transcript, escaped, json_line};
 #[derive(Parser)]
 #[command(
     name = "harness",
     version,
-    about = "Bounded read-only coding harness; explicit OpenRouter or offline scripted provider"
+    about = "Bounded coding harness; explicit OpenRouter, direct ChatGPT plan, or offline scripted provider"
 )]
 struct Args {
     #[command(subcommand)]
@@ -19,6 +20,10 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Manage this application's own ChatGPT registration and renewable session.
+    Auth(chatgpt::AuthArgs),
+    /// Discover models for a selected ChatGPT registration.
+    Models(chatgpt::ModelsArgs),
     /// Cancel saved unresolved work locally without credentials or inference.
     Abandon {
         #[arg(long)]
@@ -41,13 +46,16 @@ struct AskArgs {
     workspace: PathBuf,
     #[arg(long)]
     data_dir: Option<PathBuf>,
-    #[arg(long,default_value="scripted",value_parser=["scripted","openrouter"])]
+    #[arg(long,default_value="scripted",value_parser=["scripted","openrouter","chatgpt"])]
     provider: String,
     /// Non-secret OpenRouter JSON configuration; unknown fields are rejected.
     #[arg(long)]
     config: Option<PathBuf>,
     #[arg(long)]
     model: Option<String>,
+    /// Explicit saved ChatGPT registration label (or set it in --config).
+    #[arg(long)]
+    profile: Option<String>,
     /// Exact catalog endpoint tag. Replaces configured route; disables fallbacks.
     #[arg(long)]
     upstream: Option<String>,
@@ -89,13 +97,18 @@ async fn main() -> ExitCode {
     }
 }
 async fn run(args: Args) -> std::result::Result<u8, String> {
+    let command = match args.command {
+        Command::Auth(a) => return chatgpt::auth(a).await,
+        Command::Models(a) => return chatgpt::models(a).await,
+        c => c,
+    };
     if let Command::Abandon {
         workspace,
         data_dir,
         session,
         turn,
         json,
-    } = args.command
+    } = command
     {
         let config = Config::new(workspace, local_data_dir(data_dir)?);
         let mut engine = Engine::open(config, ScriptedProvider::new(vec![]))
@@ -120,7 +133,7 @@ async fn run(args: Args) -> std::result::Result<u8, String> {
             .await?;
         return Ok(0);
     }
-    let Command::Ask(ask) = args.command else {
+    let Command::Ask(ask) = command else {
         unreachable!()
     };
     let AskArgs {
@@ -129,6 +142,7 @@ async fn run(args: Args) -> std::result::Result<u8, String> {
         provider,
         config,
         model,
+        profile,
         upstream,
         session,
         resume_turn,
@@ -144,7 +158,12 @@ async fn run(args: Args) -> std::result::Result<u8, String> {
         prompt,
     } = *ask;
     let data_dir = local_data_dir(data_dir)?;
-    let backend: Box<dyn Provider> = if provider == "openrouter" {
+    let backend: Box<dyn Provider> = if provider == "chatgpt" {
+        chatgpt::backend(config, model, profile, upstream).await?
+    } else if provider == "openrouter" {
+        if profile.is_some() {
+            return Err("--profile requires --provider chatgpt".into());
+        }
         let mut c = if let Some(path) = config {
             let bytes = std::fs::read(path).map_err(|_| "cannot read provider config")?;
             if bytes.len() > 16384 {
@@ -175,7 +194,7 @@ async fn run(args: Args) -> std::result::Result<u8, String> {
                 .map_err(|e| e.to_string())?,
         )
     } else {
-        if config.is_some() || model.is_some() || upstream.is_some() {
+        if config.is_some() || model.is_some() || upstream.is_some() || profile.is_some() {
             return Err("provider config/model/upstream require --provider openrouter".into());
         }
         Box::new(ScriptedProvider::new(vec![ScriptStep::reply(
@@ -196,13 +215,21 @@ async fn run(args: Args) -> std::result::Result<u8, String> {
     } else {
         Policy::Supervised
     };
+    let route = if provider == "chatgpt" {
+        let b = backend.binding();
+        Some(
+            json!({"registration":b.account_ref,"model":b.model,"billing_route":"chatgpt-plan","usage":"https://chatgpt.com/settings/usage"}),
+        )
+    } else {
+        None
+    };
     let mut engine = Engine::open(c, backend).await.map_err(|e| e.to_string())?;
     let output = Output::new(json_mode);
     let mut failure = output.failed.clone();
     let operation=async{
         let session=match session{Some(id)=>SessionId(id),None=>engine.create_session().await.map_err(|e|e.to_string())?};
         let mut turn=if let Some(id)=resume_turn{engine.resume(session,TurnId(id)).await}else{engine.submit(session,prompt.unwrap_or_default()).await}.map_err(|e|e.to_string())?;
-        output.start(if json_mode{json_line(json!({"version":1,"kind":"accepted","session":session,"turn":turn.id}))}else{format!("session={} turn={} provider={}\n",session.0,turn.id.0,provider)})?;
+        output.start(if json_mode{json_line(json!({"version":1,"kind":"accepted","session":session,"turn":turn.id,"route":route}))}else{format!("session={} turn={} provider={} {}\n",session.0,turn.id.0,provider,route.as_ref().map(|v|escaped(&v.to_string())).unwrap_or_default())})?;
         let mut progress=turn.progress_receiver();let mut transcript=Transcript::default();
         let outcome=loop{
             tokio::select!{biased;
@@ -262,7 +289,7 @@ async fn run(args: Args) -> std::result::Result<u8, String> {
     Ok(match outcome.state {
         TurnState::Completed => 0,
         TurnState::Cancelled => 130,
-        TurnState::SuspendedLimit => 3,
+        TurnState::SuspendedLimit | TurnState::SuspendedRecovery => 3,
         _ => 1,
     })
 }
@@ -272,6 +299,21 @@ fn local_data_dir(path: Option<PathBuf>) -> std::result::Result<PathBuf, String>
 }
 fn guidance(r: &StopReason) -> &'static str {
     match r {
+        StopReason::ConsentRequired => {
+            "Direct ChatGPT plan usage was not granted. Run auth login chatgpt --profile <saved-profile> --enable-plan-usage, then explicitly resume."
+        }
+        StopReason::ReauthorizationRequired => {
+            "ChatGPT credentials are unavailable or rotation is uncertain. Sign in with the same saved profile, then resume; do not create a replacement registration for this session."
+        }
+        StopReason::SubscriptionLimit => {
+            "ChatGPT app usage is limited. Check https://chatgpt.com/settings/usage and resume after recovery. Reset time and remaining allowance are unknown; billing route was not changed."
+        }
+        StopReason::AccessBlocked => {
+            "ChatGPT access is blocked. Check account/workspace eligibility, policy and region; repeated sign-in is not a fix. Live qualification remains issue #9."
+        }
+        StopReason::AccountDiagnosis => {
+            "ChatGPT profile may be in use, its protected store unavailable, or account recovery did not authorize this route. Retry after local contention or diagnose grant/service state before explicitly resuming. No repeated OAuth loop."
+        }
         StopReason::Authentication => {
             "Check the configured credential reference, permissions and account/key budget."
         }

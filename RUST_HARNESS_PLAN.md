@@ -3,6 +3,10 @@
 Status: revised v2; both independent v1 reviews have been reconciled in `reviews/REVIEW_RECONCILIATION.md`. OpenRouter and direct ChatGPT plan access are both required in v0.1. These requirements postdate the frozen review input at `reviews/RUST_HARNESS_PLAN.v1.md`, and v2 has not been independently re-reviewed. M1a now implements the bounded OpenRouter read-only loop, scoped tools, durable continuation and read-only recovery. See [M1a configuration/contracts](docs/openrouter.md), [historical M0 contracts](docs/m0-contracts.md) and [actual validation limits](docs/testing.md). Live OpenRouter qualification remains outstanding in M6 (#9); ChatGPT plan access and the complete release remain unqualified.
 
 
+Offline M1b now implements own-registration auth and direct Responses inspection;
+see [CLI, protection and remaining gates](docs/chatgpt-subscription/usage.md).
+Fixture success does not qualify app/account eligibility or subscription use.
+
 - [1. Outcome and scope](docs/plan/01.md)
 - [2. Architecture and ownership](docs/plan/02.md)
 - [3. Rust implementation choices](docs/plan/03.md)
