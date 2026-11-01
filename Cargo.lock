@@ -190,6 +190,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "windows-sys",
 ]
 
 [[package]]

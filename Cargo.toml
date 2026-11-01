@@ -18,4 +18,4 @@ clap = { version = "4.6.7", features = ["derive"] }
 tempfile = "3.23"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
