@@ -147,6 +147,10 @@ pub(crate) async fn tool_result(
     s.call(move|c|{
     let tx=c.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let value: serde_json::Value = serde_json::from_str(&result)?;
+    if value["status"] == "denied" && let Some(approval_id)=value["approval_id"].as_str() {
+        event(&tx,session,t,EventKind::ApprovalResolved{turn_id:t,call_id:id.clone(),approval_id:approval_id.into(),approved:false})?;
+    }
+
     if let Some(instructions) = value.get("instructions") {
         for i in serde_json::from_value::<Vec<Instruction>>(instructions.clone())? {
             tx.execute("INSERT OR IGNORE INTO instructions SELECT epoch_id,?1,?2,?3 FROM turns WHERE id=?4", params![i.origin,i.sha256,i.content,t.0])?;
@@ -251,8 +255,8 @@ fn recover_final(
     }
     Ok(None)
 }
-/// Called only while holding the workspace OS lock. M1a has no mutating tools:
-/// unfinished inspections are truthfully skipped, completed results are reused.
+/// Called only while holding the workspace OS lock. Read-only batches retain
+/// their historical recovery behavior; pending patches require reconciliation.
 pub(crate) async fn reconcile(s: &Store, w: String) -> Result<()> {
     s.call(move|c|{
     let tx=c.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -265,8 +269,15 @@ pub(crate) async fn reconcile(s: &Store, w: String) -> Result<()> {
         }
         recover_active(&tx,session,t)?;
         let batches={let mut q=tx.prepare("SELECT DISTINCT batch_id FROM tool_calls WHERE turn_id=?1 AND batch_id>COALESCE((SELECT closed_message_id FROM checkpoints WHERE turn_id=?1),0)")?;q.query_map([t.0],|r|r.get::<_,i64>(0))?.collect::<std::result::Result<Vec<_>,_>>()?};
-        tx.execute("UPDATE tool_calls SET state='resolved',result='{\"error\":\"interrupted inspection; no completed result\"}' WHERE turn_id=?1 AND state!='resolved'",[t.0])?;
-        for batch in batches{close_tx(&tx,session,t,batch)?;}
+        let patches: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM tool_calls WHERE turn_id=?1 AND name='apply_patch' AND state!='resolved')", [t.0], |r|r.get(0))?;
+        if !patches {
+            tx.execute("UPDATE tool_calls SET state='resolved',result='{\"error\":\"interrupted inspection; no completed result\"}' WHERE turn_id=?1 AND state!='resolved'",[t.0])?;
+            for batch in batches{close_tx(&tx,session,t,batch)?;}
+        } else {
+            // Only an incomplete read may be restarted. Patch intents retain
+            // their evidence and require reconciliation before any continuation.
+            tx.execute("UPDATE tool_calls SET state='proposed' WHERE turn_id=?1 AND name!='apply_patch' AND state='intent'",[t.0])?;
+        }
         tx.execute("UPDATE model_attempts SET state='incomplete',stop_reason='\"interrupted\"' WHERE turn_id=?1 AND state='running'",[t.0])?;
         let outcome=TurnOutcome{turn_id:t,state:TurnState::Interrupted,reason:StopReason::Interrupted,text:None};
         tx.execute("UPDATE turns SET state='interrupted',outcome=?1 WHERE id=?2",params![serde_json::to_string(&outcome)?,t.0])?;
@@ -285,12 +296,13 @@ pub(crate) async fn resume(
 ) -> Result<ProviderRequest> {
     s.call(move|c|{
     let tx=c.transaction_with_behavior(TransactionBehavior::Immediate)?;records::binding(&tx,session,&w,&b)?;
-    if tx.execute("UPDATE turns SET state='running',outcome=NULL,limits=?1 WHERE id=?2 AND session_id=?3 AND state IN ('interrupted','suspended_limit')",params![limits,t.0,session.0])?!=1{return Err(Error::Busy);}
+    if tx.execute("UPDATE turns SET state='running',outcome=NULL,limits=?1 WHERE id=?2 AND session_id=?3 AND state IN ('interrupted','suspended_limit','awaiting_approval','suspended_recovery')",params![limits,t.0,session.0])?!=1{return Err(Error::Busy);}
     let r=records::request(&tx,session)?;tx.commit()?;Ok(r)
 }).await
 }
 /// The caller holds OS ownership, so a running record is orphaned. This v0.1
-/// operation only closes read-only inspections; it never invents tool success.
+/// operation closes unstarted calls and explicit unknown-effect abandonment;
+/// the caller reconciles incomplete patches first. It never invents success.
 pub(crate) async fn abandon(
     s: &Store,
     w: String,
@@ -323,7 +335,7 @@ pub(crate) async fn abandon(
             let mut q = tx.prepare("SELECT DISTINCT batch_id FROM tool_calls WHERE turn_id=?1 AND batch_id>COALESCE((SELECT closed_message_id FROM checkpoints WHERE turn_id=?1),0)")?;
             q.query_map([t.0], |r| r.get::<_, i64>(0))?.collect::<std::result::Result<Vec<_>, _>>()?
         };
-        tx.execute("UPDATE tool_calls SET state='resolved',result=CASE WHEN state='intent' THEN '{\"error\":\"abandoned inspection; no completed result\"}' ELSE '{\"error\":\"cancelled before inspection\"}' END WHERE turn_id=?1 AND state!='resolved'", [t.0])?;
+        tx.execute("UPDATE tool_calls SET state='resolved',result=CASE WHEN name='apply_patch' AND state='intent' THEN '{\"status\":\"abandoned\",\"error\":\"unknown patch effect; recorded evidence retained\"}' WHEN state='intent' THEN '{\"error\":\"abandoned inspection; no completed result\"}' ELSE '{\"error\":\"cancelled before inspection\"}' END WHERE turn_id=?1 AND state!='resolved'", [t.0])?;
         for batch in batches { close_tx(&tx, session, t, batch)?; }
         tx.execute("UPDATE model_attempts SET state='incomplete',stop_reason='\"cancelled\"' WHERE turn_id=?1 AND state='running'", [t.0])?;
         let outcome = TurnOutcome { turn_id: t, state: TurnState::Cancelled, reason: StopReason::Cancelled, text: None };

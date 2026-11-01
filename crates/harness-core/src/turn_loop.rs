@@ -1,4 +1,4 @@
-use crate::{journal, provider::*, records, store::Store, workspace::Workspace, *};
+use crate::{journal, provider::*, records, store::Store, *};
 use std::sync::Arc;
 use tokio::{
     sync::{Mutex, watch},
@@ -14,6 +14,7 @@ pub(crate) struct TurnRun {
     pub cancellation: watch::Receiver<bool>,
     pub cursor: watch::Sender<EventSequence>,
     pub progress: watch::Sender<Progress>,
+    pub authorization: crate::pending::PendingAuthorization,
 }
 impl TurnRun {
     pub async fn run(self) -> Result<TurnOutcome> {
@@ -75,6 +76,13 @@ impl TurnRun {
         let mut discarded_attempts = 0;
         let mut final_text = None;
         let reason = loop {
+            if let Some(reason) = self
+                .pending(&mut tools, &mut output, &elapsed, &checkpoint_failure)
+                .await?
+            {
+                break reason;
+            }
+
             if *self.cancellation.borrow()
                 || *checkpoint_failure.borrow()
                 || self.cursor.is_closed()
@@ -199,76 +207,11 @@ impl TurnRun {
                 final_text = Some(message.text);
                 break StopReason::Final;
             }
-            let batch = batch.ok_or_else(|| Error::Protocol("missing durable batch".into()))?;
-            let mut stop = None;
-            for call in message.calls {
-                if *self.cancellation.borrow()
-                    || *checkpoint_failure.borrow()
-                    || self.cursor.is_closed()
-                {
-                    stop = Some(StopReason::Cancelled);
-                }
-                if elapsed() >= self.config.turn_timeout.as_millis() as i64 {
-                    stop = Some(StopReason::Deadline);
-                }
-                if tools >= self.config.max_tool_calls && stop.is_none() {
-                    stop = Some(StopReason::ToolLimit);
-                }
-                if output >= self.config.max_output_bytes && stop.is_none() {
-                    stop = Some(StopReason::OutputLimit);
-                }
-                let mut result = if let Some(reason) = &stop {
-                    serde_json::json!({"error":"skipped before inspection","reason":reason})
-                        .to_string()
-                } else {
-                    journal::intent(&self.store, batch, call.id.clone(), self.turn).await?;
-                    tools += 1;
-                    let workspace = Workspace::new(&self.config);
-                    let name = call.name;
-                    let args = call.arguments;
-                    let known = journal::instruction_keys(&self.store, self.turn).await?;
-                    // Read-only blocking work is bounded and joined even on cancellation.
-                    tokio::task::spawn_blocking(move || {
-                        workspace.execute(&name, &args, &known).to_string()
-                    })
-                    .await
-                    .map_err(|_| Error::Worker)?
-                };
-                if result.len() > self.config.max_output_bytes.saturating_sub(output) {
-                    stop = Some(StopReason::OutputLimit);
-                    result=serde_json::json!({"error":"inspection result exceeds remaining output budget"}).to_string();
-                }
-                output = output.saturating_add(result.len());
-                let mut saved = journal::tool_result(
-                    &self.store,
-                    self.session,
-                    self.turn,
-                    batch,
-                    call.id.clone(),
-                    result.clone(),
-                    elapsed(),
-                )
-                .await;
-                if matches!(saved, Err(Error::Busy)) {
-                    saved = journal::tool_result(
-                        &self.store,
-                        self.session,
-                        self.turn,
-                        batch,
-                        call.id,
-                        result,
-                        elapsed(),
-                    )
-                    .await;
-                }
-                saved?;
-            }
-            self.request = journal::close(&self.store, self.session, self.turn, batch).await?;
-            if let Some(reason) = stop {
-                break reason;
-            }
+            batch.ok_or_else(|| Error::Protocol("missing durable batch".into()))?;
         };
         let state = match reason {
+            StopReason::ApprovalRequired => TurnState::AwaitingApproval,
+            StopReason::RecoveryRequired => TurnState::SuspendedRecovery,
             StopReason::Final => TurnState::Completed,
             StopReason::Cancelled => TurnState::Cancelled,
             StopReason::Refused => TurnState::Refused,

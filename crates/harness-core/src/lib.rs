@@ -4,6 +4,8 @@ mod domain;
 mod engine;
 pub mod execution;
 mod journal;
+mod patches;
+mod pending;
 mod provider;
 mod records;
 mod store;
@@ -15,6 +17,7 @@ pub use config::{Config, Policy};
 pub use domain::*;
 pub use engine::{Engine, TurnHandle};
 pub use journal::UsageRecord;
+pub use patches::{ApprovalDecision, PatchPreview};
 pub use provider::*;
 pub use workspace::Instruction;
 

@@ -85,7 +85,6 @@ async fn scoped_tools_deny_aliases_and_preserve_instruction_provenance() {
         ("list", "list_files", json!({})),
         ("nested", "read_file", json!({"path":"nested/visible.txt"})),
         ("search", "search_text", json!({"query":"needle"})),
-        ("invalid", "read_file", json!("malformed JSON arguments")),
     ] {
         frames.push(ScriptFrame::ToolCall(
             serde_json::to_string(&ToolCall {
@@ -177,13 +176,6 @@ async fn scoped_tools_deny_aliases_and_preserve_instruction_provenance() {
     assert!(!skips.iter().any(|skip| skip["path"] == ".ENV"
         || skip["path"] == "id_ecdsa"
         || skip["path"] == ".git"));
-    let invalid = &results.iter().find(|(id, _)| *id == "invalid").unwrap().1;
-    assert!(
-        invalid["error"]
-            .as_str()
-            .unwrap()
-            .contains("invalid tool arguments")
-    );
     let nested = &results.iter().find(|(id, _)| *id == "nested").unwrap().1;
     assert_eq!(nested["data"]["text"], "needle");
     assert_eq!(nested["instructions"], json!([]));
@@ -247,7 +239,7 @@ async fn scoped_tools_deny_aliases_and_preserve_instruction_provenance() {
     std::fs::create_dir(w.join("new")).unwrap();
     std::fs::write(w.join("new/AGENTS.md"), "new discovery").unwrap();
     let mut reopened = Engine::open(
-        config,
+        config.clone(),
         ScriptedProvider::new(vec![
             ScriptStep {
                 expected_prompt: "again".into(),
@@ -302,4 +294,47 @@ async fn scoped_tools_deny_aliases_and_preserve_instruction_provenance() {
     assert_eq!(discoveries[0]["instructions"][1]["origin"], "new/AGENTS.md");
     assert_eq!(discoveries[1]["instructions"], json!([]));
     reopened.shutdown().await.unwrap();
+    let mut supervised = config;
+    supervised.policy = Policy::Supervised;
+    let mut patches = Vec::new();
+    for (i, path) in paths.iter().enumerate() {
+        patches.push(ScriptStep {expected_prompt:"patch denied paths".into(),frames:vec![
+            ScriptFrame::ToolCall(serde_json::to_string(&ToolCall {id:format!("patch-{i}"),name:"apply_patch".into(),arguments:json!({"path":path,"expected_sha256":"must_not_exist","old_text":"","new_text":"must not write"}).to_string()}).unwrap()),ScriptFrame::Complete,
+        ]});
+    }
+    patches.push(ScriptStep::reply("patch denied paths", "done"));
+    let mut writer = Engine::open(supervised, ScriptedProvider::new(patches))
+        .await
+        .unwrap();
+    let mut patch_turn = writer
+        .submit(session, "patch denied paths".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        patch_turn.outcome().await.unwrap().state,
+        TurnState::Completed
+    );
+    let history = writer.protocol_history(session).await.unwrap();
+    let patch_results: Vec<_> = history
+        .messages
+        .iter()
+        .filter_map(|m| match m {
+            ProtocolMessage::ToolResult { call_id, result } if call_id.starts_with("patch-") => {
+                Some(serde_json::from_str::<Value>(result).unwrap())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(patch_results.len(), paths.len());
+    for result in patch_results {
+        assert!(
+            result["error"].as_str().unwrap().contains("denied"),
+            "{result}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(w.join(".ENV")).unwrap(),
+        "secret needle"
+    );
+    writer.shutdown().await.unwrap();
 }

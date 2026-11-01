@@ -1,12 +1,12 @@
 # z
 
-A Rust coding-agent harness with engine-owned turns, scoped inspection and local
+A Rust coding-agent harness with engine-owned turns, scoped inspection, supervised patches and local
 SQLite sessions. The first release targets Windows and requires both OpenRouter
 and direct ChatGPT plan access.
 
-**Status: M1a read-only implementation, offline verified. Live OpenRouter
+**Status: M2 supervised patches implemented with offline/native fixtures. Live OpenRouter
 qualification remains open in [M6 #9](https://github.com/zeyadomran/z/issues/9).
-Direct ChatGPT authentication, edits and command execution are later slices.**
+Direct ChatGPT authentication and command tools remain separate workstreams.**
 
 Credential-free smoke:
 
@@ -30,7 +30,9 @@ Storage defaults to `%LOCALAPPDATA%/z-harness`, outside the workspace. Keep it
 private, local and outside synchronized folders. `--data-dir` selects another
 absolute local directory; it cannot bypass the workspace lock or unresolved
 turn. `--session <id>` continues a completed conversation; `--resume-turn <id>`
-explicitly resumes suspended/interrupted read-only work without resetting budgets.
+explicitly resumes suspended/interrupted work without resetting budgets.
+Use `--policy supervised` for individually approved edits; non-TTY/JSON mode
+returns `approval_required`. Read the [patch/approval contracts](docs/supervised-patches.md).
 `harness abandon --workspace <path> --session <id> --turn <id>` resolves saved
 work locally without credentials or inference, preserving its audit history.
 

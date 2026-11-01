@@ -18,6 +18,7 @@ pub struct Engine {
     worker: Option<StoreWorker>,
     provider: Arc<Mutex<Box<dyn Provider>>>,
     active: Option<ActiveTurn>,
+    preview: Option<PatchPreview>,
 }
 struct ActiveTurn {
     cancel: watch::Sender<bool>,
@@ -77,6 +78,7 @@ impl Engine {
             worker: Some(worker),
             provider: Arc::new(Mutex::new(Box::new(provider))),
             active: None,
+            preview: None,
         })
     }
     fn store(&self) -> Result<&Store> {
@@ -102,14 +104,55 @@ impl Engine {
                 "prompt is empty or exceeds its byte limit".into(),
             ));
         }
-        self.launch(session, Some(prompt), None).await
+        self.launch(session, Some(prompt), None, None).await
     }
     /// Explicit user action resumes consumed budgets; raising Config limits is a
-    /// host decision. Completed read results are never replayed.
+    /// host decision. Completed tool results are never replayed.
     pub async fn resume(&mut self, session: SessionId, turn: TurnId) -> Result<TurnHandle> {
-        self.launch(session, None, Some(turn)).await
+        self.launch(session, None, Some(turn), None).await
     }
-    /// Explicitly abandon unresolved read-only work without inference or budget
+    /// A fresh, complete preview belongs only to this Engine instance. Audit
+    /// records never authorize writes, including after a process restart.
+    pub async fn preview_patch(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+    ) -> Result<PatchPreview> {
+        self.wait_idle().await?;
+        self.preview = None;
+        let lock = WorkspaceLock::acquire(&self.config, &self.workspace).await?;
+        let result = patches::preview(
+            self.store()?,
+            &self.config,
+            self.binding.clone(),
+            session,
+            turn,
+        )
+        .await;
+        lock.release_if_resolved(self.store()?, &self.workspace)
+            .await?;
+        let preview = result?;
+        self.preview = Some(preview.clone());
+        Ok(preview)
+    }
+    pub async fn decide_patch(
+        &mut self,
+        approval_id: &str,
+        decision: ApprovalDecision,
+    ) -> Result<TurnHandle> {
+        let preview = self.preview.take().ok_or(Error::Binding)?;
+        if preview.approval_id != approval_id || self.config.policy != Policy::Supervised {
+            return Err(Error::Binding);
+        }
+        self.launch(
+            preview.session,
+            None,
+            Some(preview.turn),
+            Some(patches::Authorization { preview, decision }),
+        )
+        .await
+    }
+    /// Explicitly abandon unresolved work without inference or budget
     /// checks. Pending results and the terminal outcome are committed atomically.
     /// This local user action needs workspace ownership, not provider credentials;
     /// it never changes the session binding or authorizes subsequent inference.
@@ -126,6 +169,26 @@ impl Engine {
             let _ = active.task.await.map_err(|_| Error::Worker)?;
         }
         let lock = WorkspaceLock::acquire(&self.config, &self.workspace).await?;
+        // Verify workspace/session before inspecting any stored patch path.
+        let w = self.workspace.clone();
+        self.store()?
+            .call(move |c| {
+                let saved: String = c.query_row(
+                    "SELECT workspace FROM sessions WHERE id=?1",
+                    [session.0],
+                    |r| r.get(0),
+                )?;
+                let owner: i64 =
+                    c.query_row("SELECT session_id FROM turns WHERE id=?1", [turn.0], |r| {
+                        r.get(0)
+                    })?;
+                if saved != w || owner != session.0 {
+                    return Err(Error::Binding);
+                }
+                Ok(())
+            })
+            .await?;
+        patches::reconcile_for_abandon(self.store()?, &self.config, session, turn).await?;
         let outcome = journal::abandon(self.store()?, self.workspace.clone(), session, turn).await;
         let cleanup = lock
             .release_if_resolved(self.store()?, &self.workspace)
@@ -137,8 +200,10 @@ impl Engine {
         session: SessionId,
         prompt: Option<String>,
         resume: Option<TurnId>,
+        authorization: crate::pending::PendingAuthorization,
     ) -> Result<TurnHandle> {
         self.store()?;
+        self.preview = None;
         if let Some(a) = &self.active
             && !a.task.is_finished()
             && a.outcome.borrow().is_none()
@@ -217,6 +282,7 @@ impl Engine {
                 cancellation,
                 cursor,
                 progress,
+                authorization,
             }
             .run()
             .await;

@@ -390,14 +390,14 @@ async fn completed_invalid_arguments_return_repairable_results() {
     };
     assert_eq!(
         serde_json::from_str::<Value>(result).unwrap()["error"],
-        "scoped inspection failed: invalid tool arguments"
+        "rejected: complete batch failed tool schema validation"
     );
     let ProtocolMessage::ToolResult { result, .. } = &history.messages[3] else {
         panic!("missing list result")
     };
     assert_eq!(
-        serde_json::from_str::<Value>(result).unwrap()["data"]["entries"],
-        json!(["visible.txt"])
+        serde_json::from_str::<Value>(result).unwrap()["status"],
+        "skipped"
     );
     engine.shutdown().await.unwrap();
     let bodies = tokio::task::spawn_blocking(move || server.join().unwrap())

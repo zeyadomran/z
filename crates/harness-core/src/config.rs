@@ -17,7 +17,7 @@ pub struct Config {
     pub policy: Policy,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Policy {
     Inspect,
     Supervised,
